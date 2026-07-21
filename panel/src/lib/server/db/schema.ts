@@ -1,0 +1,67 @@
+import { sqliteTable, text, integer, real } from 'drizzle-orm/sqlite-core';
+
+// Single-admin v1: one row, created by scripts/seed-dev.mjs or the first-run
+// setup flow. No user table / RBAC (spec's own open question, resolved as
+// single-admin for v1 — see Axon architecture spec section 11).
+export const adminSettings = sqliteTable('admin_settings', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	passwordHash: text('password_hash').notNull(),
+	createdAt: integer('created_at').notNull()
+});
+
+export const adminSessions = sqliteTable('admin_sessions', {
+	id: text('id').primaryKey(), // sha256(session cookie token) — raw token never stored, mirrors enrollment/device credential handling
+	createdAt: integer('created_at').notNull(),
+	expiresAt: integer('expires_at').notNull()
+});
+
+export const enrollmentTokens = sqliteTable('enrollment_tokens', {
+	id: text('id').primaryKey(),
+	tokenHash: text('token_hash').notNull(),
+	createdAt: integer('created_at').notNull(),
+	usedAt: integer('used_at'),
+	expiresAt: integer('expires_at').notNull()
+});
+
+export const pulseAgents = sqliteTable('pulse_agents', {
+	id: text('id').primaryKey(),
+	hostname: text('hostname').notNull(),
+	os: text('os').notNull(),
+	arch: text('arch').notNull(),
+	deviceCredentialHash: text('device_credential_hash').notNull(),
+	pulseVersion: text('pulse_version').notNull(),
+	lastSeenAt: integer('last_seen_at'),
+	cpuUsagePercent: real('cpu_usage_percent'),
+	cpuCores: integer('cpu_cores'),
+	ramTotalBytes: integer('ram_total_bytes'),
+	ramUsedBytes: integer('ram_used_bytes'),
+	createdAt: integer('created_at').notNull()
+});
+
+export const serverInstances = sqliteTable('server_instances', {
+	// composite natural key: Pulse assigns the instance id locally, unique
+	// per pulse agent, not globally — so the DB primary key combines both.
+	id: text('id').primaryKey(), // `${pulseAgentId}:${instanceId}`
+	pulseAgentId: text('pulse_agent_id').notNull(),
+	instanceId: text('instance_id').notNull(),
+	name: text('name').notNull(),
+	gamePlatform: text('game_platform').notNull(),
+	version: text('version').notNull(),
+	softwareType: text('software_type').notNull(),
+	runningState: text('running_state').notNull(),
+	playerCount: integer('player_count').notNull().default(0),
+	uptimeSeconds: integer('uptime_seconds').notNull().default(0),
+	updatedAt: integer('updated_at').notNull()
+});
+
+export const commands = sqliteTable('commands', {
+	id: text('id').primaryKey(),
+	pulseAgentId: text('pulse_agent_id').notNull(),
+	instanceId: text('instance_id').notNull(),
+	type: text('type').notNull(), // "start_instance" | "stop_instance"
+	status: text('status').notNull(), // "queued" | "sent" | "completed" | "failed"
+	resultMessage: text('result_message'),
+	createdAt: integer('created_at').notNull(),
+	sentAt: integer('sent_at'),
+	completedAt: integer('completed_at')
+});

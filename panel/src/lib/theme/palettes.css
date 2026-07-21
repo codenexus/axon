@@ -1,0 +1,70 @@
+/*
+ * Axon theme system: each palette is a block of CSS custom properties,
+ * selected via [data-theme] on <html>. Add a new palette by adding a new
+ * selector block here — no component changes needed.
+ *
+ * Status colors (success/warning/error/info) are declared once in :root and
+ * intentionally NOT overridden per palette: they carry fixed semantic
+ * meaning (red = danger) that must survive a palette like The Nether, whose
+ * own primary/accent colors are red/orange-toned. All four were checked for
+ * >=4.5:1 contrast as white-on-color (the fill+white-text badge pattern
+ * components should use) — see PR description / commit for the computed
+ * ratios (5.4, 5.4, 5.9, 6.1 respectively).
+ *
+ * Note: palettes are named by color character, not by exact in-game names,
+ * to avoid trademark issues in an OSS project — see Axon architecture spec
+ * section 10.
+ */
+
+:root {
+	--axon-status-success: #1e7a34;
+	--axon-status-warning: #9a5b00;
+	--axon-status-error: #c31e2a;
+	--axon-status-info: #1d5fbf;
+}
+
+/* Java/Bedrock (Classic) — default, light-leaning */
+:root,
+[data-theme='classic'] {
+	--axon-background: #f5f0e1;
+	--axon-surface: #e8dcc0;
+	--axon-primary: #5d8c3e;
+	--axon-secondary: #8b5a2b;
+	--axon-accent: #7c7c7c;
+	--axon-text: #2b2b22;
+}
+
+/* The End — dark, otherworldly */
+[data-theme='end'] {
+	--axon-background: #1a1225;
+	--axon-surface: #251a33;
+	--axon-primary: #d9d68c;
+	--axon-secondary: #8b4fa8;
+	--axon-accent: #5c4a7a;
+	--axon-text: #ede6f5;
+}
+
+/* The Nether — dark, warm/intense */
+[data-theme='nether'] {
+	--axon-background: #1c0e0b;
+	--axon-surface: #3d1f16;
+	--axon-primary: #e8823c;
+	--axon-secondary: #8b2d5c;
+	--axon-accent: #4fd9c4;
+	--axon-text: #f5e6d8;
+}
+
+html {
+	background: var(--axon-background);
+	color: var(--axon-text);
+	color-scheme: light dark;
+}
+
+body {
+	margin: 0;
+	font-family:
+		system-ui,
+		-apple-system,
+		'Segoe UI',
+		sans-serif;
+}

@@ -1,0 +1,30 @@
+# Go
+pulse/dist/
+pulse/*.exe
+pulse/tools/**/*.exe
+
+# Node / pnpm
+node_modules/
+panel/.svelte-kit/
+panel/build/
+panel/.wrangler/
+panel/dist/
+
+# Tauri
+panel/src-tauri/target/
+
+# Local env / secrets
+.env
+.env.*
+!.env.*.example
+wrangler.toml
+!wrangler.toml.example
+*.sqlite
+*.sqlite-*
+credential.json
+update-state.json
+
+# Editor / OS
+.DS_Store
+.vscode/
+*.log

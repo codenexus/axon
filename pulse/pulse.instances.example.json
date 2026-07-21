@@ -1,0 +1,13 @@
+{
+  "instances": [
+    {
+      "id": "survival",
+      "name": "Survival SMP",
+      "game_platform": "java",
+      "version": "1.21.1",
+      "software_type": "vanilla",
+      "command": ["java", "-Xmx2G", "-jar", "server.jar", "nogui"],
+      "working_dir": "/path/to/your/server"
+    }
+  ]
+}
