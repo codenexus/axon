@@ -31,6 +31,20 @@ with 403. `pnpm run dev` doesn't need this (Vite's dev server sets it for
 you); only the built server does. Tauri's sidecar (once implemented) will
 need to set the same env var when it spawns `build/index.js`.
 
+### Cloudflare target
+
+Not needed for local dev — only when actually testing/deploying the hosted
+target:
+
+```sh
+pnpm exec wrangler login                 # one-time Cloudflare auth
+pnpm exec wrangler d1 create axon        # prints a database_id
+cp wrangler.toml.example wrangler.toml   # gitignored; paste the database_id in
+pnpm exec wrangler d1 migrations apply axon --local    # or --remote once the DB exists on Cloudflare
+ADAPTER=cloudflare pnpm run build
+pnpm exec wrangler dev                   # local smoke test against the D1 binding
+```
+
 ## Status
 
 Vertical slice: single-admin login, enrollment token generation, `/api/v1/enroll`
