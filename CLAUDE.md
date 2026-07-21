@@ -161,20 +161,74 @@ color character (Classic/End/Nether), not exact in-game names — a
 trademark consideration for the OSS project; keep that convention for new
 palettes.
 
+## Coding conventions established so far
+
+- **Never store raw secrets.** Enrollment tokens, device credentials, and
+  session cookies are hashed with `sha256Hex()` before hitting the DB
+  (`panel/src/lib/server/tokens.ts`); only the hash is persisted, matching
+  Beacon's pattern. Admin passwords use `scrypt` (`hashPassword`/
+  `verifyPassword`, same file). Follow this for any new credential type.
+- **Server-only code lives under `panel/src/lib/server/`**, one small
+  module per concern (`db/`, `auth.ts`, `tokens.ts`, `http.ts`, `commands.ts`,
+  `protocol.ts`) — imported only from `+server.ts` / `+page.server.ts` /
+  `hooks.server.ts`, never from `.svelte` files.
+- **Shared DB mutations get extracted into a `lib/server/*.ts` helper**
+  and called from both a form action and a REST route rather than
+  duplicated — see `queueCommand()` in `commands.ts`, used by both
+  `+page.server.ts`'s `queueCommand` action and
+  `api/v1/commands/+server.ts`. Follow this shape for future mutations
+  (e.g. a future RCON dispatch or backup-trigger endpoint).
+- **Admin-facing mutations are SvelteKit form actions with `use:enhance`**,
+  not client-side `fetch()` calls to a JSON API. The `/api/v1/*` routes are
+  reserved for cross-boundary callers (Pulse agents, bearer-token
+  authenticated) — `/api/v1/commands` is the one route that also accepts
+  admin session auth, documented there as the deliberate exception, not the
+  norm.
+- **Heartbeat-driven upserts use a composite string id**:
+  `` `${pulseAgentId}:${instanceId}` `` as the `server_instances` primary
+  key, via `onConflictDoUpdate`. Use the same "prefix:localId" shape for
+  any future per-agent-scoped resource Panel needs to key on.
+- **Go: one `internal/<concern>/` package per concern**
+  (`protocol`, `credential`, `mcserver`, `inventory`), platform-specific
+  behavior split into `_unix.go` / `_windows.go` files with build tags
+  rather than runtime `if runtime.GOOS` branching (see
+  `mcserver/process_unix.go` vs `process_windows.go`).
+- **Wire types are hand-mirrored, not codegenned**: Go structs in
+  `pulse/internal/protocol/types.go` and TS interfaces in
+  `panel/src/lib/server/protocol.ts` must be updated together, same
+  snake_case JSON field names on both sides. Don't introduce a shared
+  schema tool speculatively — it hasn't been needed yet — but do remember
+  to update both files for any wire-shape change.
+- **Go tests avoid needing a real Minecraft server**: `manager_test.go`
+  drives `mcserver.Manager` against a trivial `sh -c "sleep N"` stand-in
+  process. Keep using cheap stand-ins for process-lifecycle tests rather
+  than requiring a real server jar.
+- **CSS custom properties are prefixed `--axon-*`** (see `STYLE.md` for the
+  full palette/spacing conventions).
+
 ## Project status / scope
 
-Deliberately implemented in this vertical slice:
+Deliberately implemented in this vertical slice, verified end-to-end
+locally (seed admin → log in → generate token → run pulse → enroll →
+heartbeat → start → confirm running → stop → confirm stopped) and in CI:
 
 - Pulse: enrollment, heartbeat, start/stop of one or more configured
-  Minecraft processes.
+  Minecraft processes. `go build/vet/test` clean.
 - Panel: single-admin auth, enrollment token generation, dashboard listing
-  agents/instances, start/stop command queueing.
+  agents/instances, start/stop command queueing, 3 working theme palettes.
+  `svelte-check` clean; both `ADAPTER=node` and `ADAPTER=cloudflare` builds
+  pass in CI (`.github/workflows/ci.yml`).
+- Repo pushed to `codenexus/axon` (private), `main` branch, with root/pulse/
+  panel READMEs and this file.
 
 Deliberately deferred — don't assume half-built unless you find code for it:
 
 - RCON console commands, backups, self-update, file management
   (plugins/mods browsing, uploads), multi-user auth/RBAC, mDNS/Bonjour
   discovery, Java-prerequisite install flow, Tauri sidecar process spawning.
+
+See `PROJECT_LOG.md` for session-by-session history and next steps, and
+`STYLE.md` for UI/UX conventions.
 
 ## License
 
