@@ -1,8 +1,9 @@
 import { error, fail } from '@sveltejs/kit';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import type { Actions, PageServerLoad } from './$types';
-import { backupDownloads, backups, pulseAgents, serverInstances } from '$lib/server/db/schema';
+import { backupDownloads, backups, backupSchedules, pulseAgents, serverInstances } from '$lib/server/db/schema';
 import { DOWNLOAD_REQUEST_TTL_MS, pruneExpiredDownloads } from '$lib/server/backupDownloads';
+import { applyRetention } from '$lib/server/backupSchedules';
 import { failStaleCommands, newBackupId, queueCommand } from '$lib/server/commands';
 
 export const load: PageServerLoad = async ({ params, locals }) => {
@@ -43,8 +44,29 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 		.from(pulseAgents)
 		.where(eq(pulseAgents.id, instance.pulseAgentId));
 
-	return { instance, backups: instanceBackups, downloadsByBackupId, agentHeartbeat: agent ?? null };
+	const [schedule] = await locals.db
+		.select()
+		.from(backupSchedules)
+		.where(eq(backupSchedules.serverInstanceId, params.serverInstanceId));
+
+	return {
+		instance,
+		backups: instanceBackups,
+		downloadsByBackupId,
+		agentHeartbeat: agent ?? null,
+		schedule: schedule ?? null
+	};
 };
+
+// Empty string (field left blank) means "disable this dimension", not
+// "invalid input" — matches saveSchedule's leave-blank-to-disable UX.
+function parsePositiveIntOrNull(raw: FormDataEntryValue | null): number | null | 'invalid' {
+	const value = String(raw ?? '').trim();
+	if (!value) return null;
+	const parsed = Number(value);
+	if (!Number.isInteger(parsed) || parsed <= 0) return 'invalid';
+	return parsed;
+}
 
 export const actions: Actions = {
 	createBackup: async ({ params, locals }) => {
@@ -201,6 +223,67 @@ export const actions: Actions = {
 		});
 
 		await locals.db.update(backups).set({ pendingOperation: 'restore', commandId }).where(eq(backups.id, backupId));
+
+		return { ok: true };
+	},
+
+	saveSchedule: async ({ request, params, locals }) => {
+		const [instance] = await locals.db
+			.select()
+			.from(serverInstances)
+			.where(eq(serverInstances.id, params.serverInstanceId));
+		if (!instance) return fail(404, { error: 'instance not found' });
+
+		const form = await request.formData();
+		const intervalHours = parsePositiveIntOrNull(form.get('interval_hours'));
+		const keepCount = parsePositiveIntOrNull(form.get('keep_count'));
+		const keepDays = parsePositiveIntOrNull(form.get('keep_days'));
+		if (intervalHours === 'invalid' || keepCount === 'invalid' || keepDays === 'invalid') {
+			return fail(400, { error: 'interval hours, keep count, and keep days must be positive whole numbers' });
+		}
+		if (intervalHours === null && keepCount === null && keepDays === null) {
+			return fail(400, { error: 'set at least one of interval hours, keep count, or keep days' });
+		}
+
+		// onConflictDoUpdate's `set` deliberately omits lastRunAt/createdAt —
+		// an existing row's due-check anchor and creation time survive an
+		// edit to the interval/retention numbers untouched. The `values`
+		// below only take effect for a genuinely new row.
+		await locals.db
+			.insert(backupSchedules)
+			.values({
+				serverInstanceId: instance.id,
+				pulseAgentId: instance.pulseAgentId,
+				instanceId: instance.instanceId,
+				intervalHours,
+				keepCount,
+				keepDays,
+				lastRunAt: null,
+				createdAt: Date.now()
+			})
+			.onConflictDoUpdate({
+				target: backupSchedules.serverInstanceId,
+				set: { intervalHours, keepCount, keepDays }
+			});
+
+		return { ok: true };
+	},
+
+	disableSchedule: async ({ params, locals }) => {
+		await locals.db.delete(backupSchedules).where(eq(backupSchedules.serverInstanceId, params.serverInstanceId));
+		return { ok: true };
+	},
+
+	applyRetentionNow: async ({ params, locals }) => {
+		const [schedule] = await locals.db
+			.select()
+			.from(backupSchedules)
+			.where(eq(backupSchedules.serverInstanceId, params.serverInstanceId));
+		if (!schedule || (!schedule.keepCount && !schedule.keepDays)) {
+			return fail(400, { error: 'no retention configured for this instance' });
+		}
+
+		await applyRetention(locals.db, schedule, Date.now());
 
 		return { ok: true };
 	}

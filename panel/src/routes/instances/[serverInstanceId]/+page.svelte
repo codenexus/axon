@@ -3,9 +3,9 @@
 	import { invalidateAll } from '$app/navigation';
 	import { heartbeatProgress, nextHeartbeatLabel } from '$lib/heartbeat';
 	import ConfirmModal from '$lib/components/ConfirmModal.svelte';
-	import type { PageData } from './$types';
+	import type { ActionData, PageData } from './$types';
 
-	let { data }: { data: PageData } = $props();
+	let { data, form }: { data: PageData; form: ActionData } = $props();
 
 	// Restore confirmation: the button opens the themed modal instead of
 	// submitting directly; confirming it programmatically submits the
@@ -121,6 +121,71 @@
 			<p class="meta">{data.instance.gamePlatform} · {data.instance.softwareType} {data.instance.version}</p>
 		</div>
 	</header>
+
+	<section class="card">
+		<div class="section-header">
+			<h2>Backup Schedule</h2>
+		</div>
+
+		<form method="POST" action="?/saveSchedule" use:enhance class="schedule-form">
+			<label>
+				Interval (hours)
+				<input
+					type="number"
+					name="interval_hours"
+					min="1"
+					step="1"
+					value={data.schedule?.intervalHours ?? ''}
+					placeholder="off"
+				/>
+			</label>
+			<label>
+				Keep count
+				<input
+					type="number"
+					name="keep_count"
+					min="1"
+					step="1"
+					value={data.schedule?.keepCount ?? ''}
+					placeholder="unlimited"
+				/>
+			</label>
+			<label>
+				Keep days
+				<input
+					type="number"
+					name="keep_days"
+					min="1"
+					step="1"
+					value={data.schedule?.keepDays ?? ''}
+					placeholder="unlimited"
+				/>
+			</label>
+			<button type="submit">Save</button>
+		</form>
+		{#if form?.error}
+			<p class="error">{form.error}</p>
+		{/if}
+
+		{#if data.schedule}
+			<p class="meta">
+				{data.schedule.intervalHours
+					? `Automatic backup every ${data.schedule.intervalHours}h`
+					: 'No automatic backups'} · keep {data.schedule.keepCount ?? '∞'} / {data.schedule.keepDays ?? '∞'}d
+			</p>
+			<p class="meta">Last automatic backup: {formatTimestamp(data.schedule.lastRunAt)}</p>
+			<div class="backup-actions">
+				<form method="POST" action="?/disableSchedule" use:enhance>
+					<button type="submit" class="ghost">Disable</button>
+				</form>
+				<form method="POST" action="?/applyRetentionNow" use:enhance>
+					<button type="submit" class="ghost" disabled={!data.schedule.keepCount && !data.schedule.keepDays}>
+						Apply Retention Now
+					</button>
+				</form>
+			</div>
+		{/if}
+	</section>
 
 	<section class="card">
 		<div class="section-header">
@@ -284,6 +349,31 @@
 
 	.section-header h2 {
 		margin: 0;
+	}
+
+	.schedule-form {
+		display: flex;
+		align-items: flex-end;
+		gap: 0.75rem;
+		flex-wrap: wrap;
+		margin-bottom: 0.75rem;
+	}
+
+	.schedule-form label {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+		font-size: 0.8rem;
+		opacity: 0.85;
+	}
+
+	.schedule-form input {
+		padding: 0.5rem 0.625rem;
+		border-radius: 0.375rem;
+		border: 1px solid var(--axon-accent);
+		background: var(--axon-background);
+		color: var(--axon-text);
+		width: 8rem;
 	}
 
 	.backups {

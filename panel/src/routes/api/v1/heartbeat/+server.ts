@@ -4,6 +4,7 @@ import type { RequestHandler } from './$types';
 import { commands, pulseAgents, serverInstances } from '$lib/server/db/schema';
 import { failStaleCommands, resolveCommandOutcome } from '$lib/server/commands';
 import { pruneExpiredDownloads } from '$lib/server/backupDownloads';
+import { runSchedulesForAgent } from '$lib/server/backupSchedules';
 import { bearerToken } from '$lib/server/http';
 import { sha256Hex } from '$lib/server/tokens';
 import type { HeartbeatRequestBody, HeartbeatResponseBody, WireCommand } from '$lib/server/protocol';
@@ -70,14 +71,19 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 		);
 	}
 
-	// Opportunistic cleanup, both piggybacked on this agent's regular
-	// heartbeat cadence rather than a real timer, consistent with the
-	// project's request-driven design: abandoned download holds (admin
-	// requested a download, then never clicked it, or it never became
-	// ready), and commands stuck 'sent' because Pulse died/restarted before
-	// reporting a result (see CLAUDE.md's former "Known gaps" entry on this).
+	// Opportunistic work, all piggybacked on this agent's regular heartbeat
+	// cadence rather than a real timer, consistent with the project's
+	// request-driven design: abandoned download holds (admin requested a
+	// download, then never clicked it, or it never became ready), commands
+	// stuck 'sent' because Pulse died/restarted before reporting a result
+	// (see CLAUDE.md's former "Known gaps" entry on this), and due backup
+	// schedules / retention pruning for this agent's instances. Runs before
+	// the queued-command select below so anything just queued here (a
+	// scheduled backup_instance, or a retention delete_backup) is picked up
+	// and sent in this same response.
 	await pruneExpiredDownloads(locals.db, agent.id);
 	await failStaleCommands(locals.db, agent.id);
+	await runSchedulesForAgent(locals.db, agent.id, now);
 
 	const queued = await locals.db
 		.select()

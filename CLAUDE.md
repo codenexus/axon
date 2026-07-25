@@ -195,7 +195,7 @@ methods in `manager.go`):
   Pulse restart *after* that self-heals correctly, since every process it
   spawns from then on gets a real PID file automatically.
 
-### Backups (implemented: manual create/list/delete, download, restore)
+### Backups (implemented: manual create/list/delete, download, restore, scheduling + retention)
 
 Full design lived in a plan doc during development; the durable summary is
 here. Four foundational decisions, all still load-bearing:
@@ -205,10 +205,10 @@ here. Four foundational decisions, all still load-bearing:
    below). This avoids duplicate storage and matches the
    no-inbound-connections principle: Pulse pushes bytes to Panel on
    request, Panel never reaches into Pulse.
-2. **Scheduling (when built) is Panel-owned**, evaluated inline during
-   heartbeat handling — no new Go dependency in Pulse, fits the
-   request-driven (no persistent timers) design Cloudflare compatibility
-   requires. **Not built yet** — see "Project status" below.
+2. **Scheduling is Panel-owned**, evaluated inline during heartbeat
+   handling — no new Go dependency in Pulse, fits the request-driven (no
+   persistent timers) design Cloudflare compatibility requires. See
+   "Backup scheduling + retention" below for the implementation.
 3. **Backup scope is the whole `working_dir`** (world + server.properties +
    plugins/mods/configs), tar+gzip, stdlib only
    (`archive/tar`+`compress/gzip`), excluding `logs/`, `crash-reports/`,
@@ -293,6 +293,45 @@ test before this ever touched a real host.
 **Confirming a restore uses a themed modal**
 (`panel/src/lib/components/ConfirmModal.svelte`), not the browser's native
 `confirm()` — see STYLE.md.
+
+**Backup scheduling + retention** (`panel/src/lib/server/backupSchedules.ts`):
+one `backupSchedules` row per instance (`serverInstanceId` PK, so presence
+of the row plus which of `intervalHours`/`keepCount`/`keepDays` are
+non-null fully expresses the state — no separate enabled flag; deleting
+the row turns everything off). `runSchedulesForAgent()` is called
+agent-scoped from the heartbeat route, in the same opportunistic-cleanup
+spot as `pruneExpiredDownloads`/`failStaleCommands` and for the same
+reason (request-piggybacked, no timer), before the `queued`-command
+select so anything it queues ships in that same response:
+
+- `queueScheduledBackupIfDue()`: if `intervalHours` is set and
+  `now >= lastRunAt + intervalHours`, queues a `backup_instance` command
+  (`trigger: 'scheduled'`) exactly like the manual "Create backup" button.
+  `lastRunAt` is stamped *immediately*, before the backup resolves, so a
+  short interval relative to how long a backup takes can't cause pile-up —
+  the next due-check compares against this timestamp, not completion. A
+  freshly-configured schedule (`lastRunAt` still null) is due on the very
+  next heartbeat rather than waiting a full interval — lets the admin
+  confirm a schedule is actually wired up without a heartbeat-scale wait.
+- `applyRetention()`: candidates are an instance's `status='complete' AND
+  pendingOperation IS NULL` backups (already-in-flight rows are excluded
+  from ranking entirely, not just from being re-deleted), newest first. A
+  backup survives if it's the single newest, **or** within the
+  `keepCount` budget, **or** within the `keepDays` window — union, not
+  intersection ("keep at least N most recent AND everything from the last
+  D days" is the forgiving, standard interpretation). Everything else gets
+  a `delete_backup` command queued exactly like the manual Delete button.
+  Runs unconditionally alongside the due-check on every heartbeat for
+  every configured schedule (cheap: a select + in-memory filter, writes
+  only when something's actually stale).
+- Exported separately (not one combined function) so the instance page's
+  **Apply Retention Now** button can call `applyRetention()` alone,
+  without also triggering an unexpected extra backup.
+- No live due-countdown in the UI — the instance page shows the configured
+  values and a static "last automatic backup" timestamp; the existing
+  unconditional 3s poll already surfaces schedule-driven backup rows and
+  their in-flight badges for free via the same `backups`/`pendingOperation`
+  machinery every other backup uses.
 
 ### Deploying Pulse to a real host — currently fully manual
 
@@ -520,10 +559,6 @@ dashboard header (see STYLE.md).
 
 ## Known gaps (real, not yet fixed — don't assume otherwise)
 
-- **Scheduling/retention (backups Phase 4) is not built.** No
-  `backupSchedules` table, no due-check, no automatic pruning, no "Apply
-  Retention Now" button. The mockup reference (see below) and this file's
-  "Backups" section both assume it's coming; it isn't there yet.
 - **Restore has never been run against nimo's real backups** (only the
   isolated sandbox, thoroughly) — deliberately left to the user to trigger
   first, given it's destructive even with the safety-backup net.
@@ -542,16 +577,15 @@ a real production Bedrock server ("nimo", home LAN, Tailscale-reachable):
   `/settings`), dashboard listing agents/instances with online/offline
   status + accurate in-flight badges, start/stop/restart controls, a
   per-instance backups page (`/instances/[serverInstanceId]`) with
-  create/list/delete/download/restore, a themed confirm modal, 3 working
-  theme palettes. `svelte-check` clean; both `ADAPTER=node` and
-  `ADAPTER=cloudflare` builds pass.
+  create/list/delete/download/restore, backup scheduling + retention
+  (interval-based automatic backups, keep-count/keep-days pruning, "Apply
+  Retention Now"), a themed confirm modal, 3 working theme palettes.
+  `svelte-check` clean; both `ADAPTER=node` and `ADAPTER=cloudflare`
+  builds pass.
 - Repo pushed to `codenexus/axon` (private), `main` branch.
 
 Deliberately deferred — don't assume half-built unless you find code for it:
 
-- **Backup scheduling + retention** (keep-count/keep-days automatic
-  pruning, "Apply Retention Now") — the next logical piece, see "Known
-  gaps".
 - A raw RCON console UI (arbitrary command input) plus dedicated
   whitelist/op/ban forms, file management (plugins/mods browsing,
   uploads), multi-user auth/RBAC, mDNS/Bonjour discovery, Java-prerequisite

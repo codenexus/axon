@@ -86,6 +86,17 @@ export const backups = sqliteTable('backups', {
 	completedAt: integer('completed_at')
 });
 
+export const backupSchedules = sqliteTable('backup_schedules', {
+	serverInstanceId: text('server_instance_id').primaryKey(),
+	pulseAgentId: text('pulse_agent_id').notNull(), // denormalized, same reason as backupDownloads.pulseAgentId — agent-scoped heartbeat queries without a join
+	instanceId: text('instance_id').notNull(), // Pulse-local id, needed verbatim by queueCommand
+	intervalHours: integer('interval_hours'), // null = no automatic backups; retention below still applies independently
+	keepCount: integer('keep_count'), // null = no count-based retention
+	keepDays: integer('keep_days'), // null = no age-based retention
+	lastRunAt: integer('last_run_at'), // last time the due-check queued a scheduled backup; null = never
+	createdAt: integer('created_at').notNull()
+});
+
 // Transient — Pulse pushes the backup file here on request rather than
 // Panel storing a durable second copy (see CLAUDE.md's push-backup design:
 // Pulse's own disk is the source of truth). A second download request for
