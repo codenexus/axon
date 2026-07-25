@@ -1,0 +1,1 @@
+ALTER TABLE `pulse_agents` ADD `interval_seconds` integer;

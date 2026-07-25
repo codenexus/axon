@@ -4,12 +4,16 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
 	"time"
 
+	"github.com/codenexus/axon/pulse/internal/backup"
 	"github.com/codenexus/axon/pulse/internal/credential"
 	"github.com/codenexus/axon/pulse/internal/inventory"
 	"github.com/codenexus/axon/pulse/internal/mcserver"
@@ -45,14 +49,20 @@ func main() {
 		cred.ServerURL = *serverURL
 	}
 
-	instanceConfigs, err := mcserver.LoadConfig(*configPath)
+	instanceConfigs, backupsDir, err := mcserver.LoadConfig(*configPath)
 	if err != nil {
 		log.Printf("no instance config loaded (%v); starting with zero configured instances", err)
 	}
 	manager := mcserver.NewManager(instanceConfigs)
+	manager.Reconcile()
+
+	if backupsDir == "" {
+		backupsDir = filepath.Join(credential.Dir(), "backups")
+	}
+	backupEngine := backup.NewEngine(backupsDir)
 
 	client := protocol.NewClient(cred.ServerURL)
-	runLoop(client, cred, manager, *interval)
+	runLoop(client, cred, manager, backupEngine, *interval)
 }
 
 func enroll(serverURL, token string) (*credential.Credential, error) {
@@ -80,7 +90,7 @@ func enroll(serverURL, token string) (*credential.Credential, error) {
 	return cred, nil
 }
 
-func runLoop(client *protocol.Client, cred *credential.Credential, manager *mcserver.Manager, interval time.Duration) {
+func runLoop(client *protocol.Client, cred *credential.Credential, manager *mcserver.Manager, backupEngine *backup.Engine, interval time.Duration) {
 	var pendingResults []protocol.CommandResult
 
 	for {
@@ -90,6 +100,7 @@ func runLoop(client *protocol.Client, cred *credential.Credential, manager *mcse
 			PulseVersion:          version,
 			Host:                  inventory.Collect(),
 			Instances:             manager.Statuses(),
+			IntervalSeconds:       int(interval.Seconds()),
 			PendingCommandResults: pendingResults,
 		}
 
@@ -102,27 +113,217 @@ func runLoop(client *protocol.Client, cred *credential.Credential, manager *mcse
 		pendingResults = nil
 
 		for _, cmd := range resp.Commands {
-			pendingResults = append(pendingResults, execute(manager, cmd))
+			pendingResults = append(pendingResults, execute(client, cred, manager, backupEngine, cmd))
 		}
 
 		time.Sleep(interval)
 	}
 }
 
-func execute(manager *mcserver.Manager, cmd protocol.Command) protocol.CommandResult {
-	var err error
+func execute(client *protocol.Client, cred *credential.Credential, manager *mcserver.Manager, backupEngine *backup.Engine, cmd protocol.Command) protocol.CommandResult {
 	switch cmd.Type {
 	case "start_instance":
-		err = manager.Start(cmd.InstanceID)
+		if err := manager.Start(cmd.InstanceID); err != nil {
+			log.Printf("command %s (%s) failed: %v", cmd.ID, cmd.Type, err)
+			return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: err.Error()}
+		}
+		return protocol.CommandResult{CommandID: cmd.ID, Success: true}
+
 	case "stop_instance":
-		err = manager.Stop(cmd.InstanceID)
+		if err := manager.Stop(cmd.InstanceID); err != nil {
+			log.Printf("command %s (%s) failed: %v", cmd.ID, cmd.Type, err)
+			return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: err.Error()}
+		}
+		return protocol.CommandResult{CommandID: cmd.ID, Success: true}
+
+	case "restart_instance":
+		return executeRestart(manager, cmd)
+
+	case "backup_instance":
+		return executeBackup(manager, backupEngine, cmd)
+
+	case "delete_backup":
+		var payload protocol.BackupCommandPayload
+		if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+			return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "invalid payload: " + err.Error()}
+		}
+		if err := backupEngine.Delete(cmd.InstanceID, payload.BackupID); err != nil {
+			log.Printf("command %s (%s) failed: %v", cmd.ID, cmd.Type, err)
+			return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: err.Error()}
+		}
+		return protocol.CommandResult{CommandID: cmd.ID, Success: true}
+
+	case "push_backup":
+		return executePushBackup(client, cred, backupEngine, cmd)
+
+	case "restore_backup":
+		return executeRestore(manager, backupEngine, cmd)
+
 	default:
 		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "unknown command type: " + cmd.Type}
 	}
+}
 
-	if err != nil {
+// stopWaitTimeout bounds how long a command that needs an instance fully
+// stopped first (backup_instance, restart_instance) waits for that before
+// giving up entirely.
+const stopWaitTimeout = 30 * time.Second
+
+// executeRestart stops a running instance and starts it back up. If the
+// instance was already stopped, it's equivalent to a plain start — safe to
+// route every "Restart" click through this one command type regardless of
+// current state, rather than the dashboard needing to know which of
+// start/restart applies.
+func executeRestart(manager *mcserver.Manager, cmd protocol.Command) protocol.CommandResult {
+	if manager.IsRunning(cmd.InstanceID) {
+		if err := manager.Stop(cmd.InstanceID); err != nil {
+			return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "stop before restart: " + err.Error()}
+		}
+		if err := manager.WaitStopped(cmd.InstanceID, stopWaitTimeout); err != nil {
+			return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "waiting for stop before restart: " + err.Error()}
+		}
+	}
+	if err := manager.Start(cmd.InstanceID); err != nil {
 		log.Printf("command %s (%s) failed: %v", cmd.ID, cmd.Type, err)
 		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: err.Error()}
 	}
 	return protocol.CommandResult{CommandID: cmd.ID, Success: true}
+}
+
+// executeBackup stops a running instance before archiving it (RCON's
+// save-off/save-all pause-writes convention is Java-only and unsupported on
+// Bedrock, so stopping first is the only edition-agnostic way to guarantee
+// a consistent archive — see the backup package doc), then restarts it
+// afterward if and only if it was running beforehand. An already-stopped
+// instance is archived directly and left stopped.
+func executeBackup(manager *mcserver.Manager, backupEngine *backup.Engine, cmd protocol.Command) protocol.CommandResult {
+	var payload protocol.BackupCommandPayload
+	if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "invalid payload: " + err.Error()}
+	}
+
+	cfg, ok := manager.InstanceConfig(cmd.InstanceID)
+	if !ok {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "unknown instance " + cmd.InstanceID}
+	}
+
+	wasRunning := manager.IsRunning(cmd.InstanceID)
+	if wasRunning {
+		if err := manager.Stop(cmd.InstanceID); err != nil {
+			return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "stop before backup: " + err.Error()}
+		}
+		if err := manager.WaitStopped(cmd.InstanceID, stopWaitTimeout); err != nil {
+			return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "waiting for stop before backup: " + err.Error()}
+		}
+	}
+
+	result, err := backupEngine.Create(cfg, payload.BackupID)
+
+	var restartErr error
+	if wasRunning {
+		restartErr = manager.Start(cmd.InstanceID)
+	}
+
+	if err != nil {
+		msg := err.Error()
+		if restartErr != nil {
+			msg += fmt.Sprintf("; also failed to restart instance after backup: %v", restartErr)
+		}
+		log.Printf("command %s (%s) failed: %s", cmd.ID, cmd.Type, msg)
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: msg}
+	}
+
+	message := ""
+	if restartErr != nil {
+		message = fmt.Sprintf("backup succeeded but failed to restart instance: %v", restartErr)
+		log.Printf("command %s (%s): %s", cmd.ID, cmd.Type, message)
+	}
+	return protocol.CommandResult{
+		CommandID: cmd.ID,
+		Success:   true,
+		Message:   message,
+		SizeBytes: result.SizeBytes,
+		Checksum:  result.ChecksumSHA256,
+	}
+}
+
+// executePushBackup streams an already-created backup archive to Panel on
+// request, for the admin to download — Pulse's disk is the only durable
+// copy (see the backup package doc), Panel only ever holds this file
+// transiently.
+func executePushBackup(client *protocol.Client, cred *credential.Credential, backupEngine *backup.Engine, cmd protocol.Command) protocol.CommandResult {
+	var payload protocol.BackupCommandPayload
+	if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "invalid payload: " + err.Error()}
+	}
+
+	path := backupEngine.PathFor(cmd.InstanceID, payload.BackupID)
+	f, err := os.Open(path)
+	if err != nil {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "open backup file: " + err.Error()}
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "stat backup file: " + err.Error()}
+	}
+
+	if err := client.PushBackup(cred.DeviceCredential, payload.BackupID, cmd.InstanceID, f, info.Size()); err != nil {
+		log.Printf("command %s (%s) failed: %v", cmd.ID, cmd.Type, err)
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: err.Error()}
+	}
+	return protocol.CommandResult{CommandID: cmd.ID, Success: true}
+}
+
+// executeRestore is the highest-blast-radius command in the system — it
+// overwrites a live world with an older one. Sequence: stop (if running) ->
+// take a pre-restore safety backup -> wipe+extract the target backup ->
+// leave stopped (the admin restarts explicitly once satisfied, rather than
+// this silently handing control back to a world they haven't looked at
+// yet). The safety backup's SizeBytes/Checksum are reported whenever that
+// step itself succeeded, independent of the overall Success flag — so
+// Panel can record a real, usable safety backup even in the case where the
+// safety backup worked but the extract step afterward failed.
+func executeRestore(manager *mcserver.Manager, backupEngine *backup.Engine, cmd protocol.Command) protocol.CommandResult {
+	var payload protocol.RestoreCommandPayload
+	if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "invalid payload: " + err.Error()}
+	}
+
+	cfg, ok := manager.InstanceConfig(cmd.InstanceID)
+	if !ok {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "unknown instance " + cmd.InstanceID}
+	}
+
+	if manager.IsRunning(cmd.InstanceID) {
+		if err := manager.Stop(cmd.InstanceID); err != nil {
+			return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "stop before restore: " + err.Error()}
+		}
+		if err := manager.WaitStopped(cmd.InstanceID, stopWaitTimeout); err != nil {
+			return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "waiting for stop before restore: " + err.Error()}
+		}
+	}
+
+	safetyResult, err := backupEngine.Create(cfg, payload.SafetyBackupID)
+	if err != nil {
+		log.Printf("command %s (%s) failed: pre-restore safety backup: %v", cmd.ID, cmd.Type, err)
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "pre-restore safety backup failed: " + err.Error()}
+	}
+
+	result := protocol.CommandResult{
+		CommandID: cmd.ID,
+		SizeBytes: safetyResult.SizeBytes,
+		Checksum:  safetyResult.ChecksumSHA256,
+	}
+
+	if err := backupEngine.Restore(cfg, payload.BackupID); err != nil {
+		log.Printf("command %s (%s) failed: restore: %v", cmd.ID, cmd.Type, err)
+		result.Success = false
+		result.Message = "restore failed (pre-restore safety backup was taken successfully first): " + err.Error()
+		return result
+	}
+
+	result.Success = true
+	return result
 }

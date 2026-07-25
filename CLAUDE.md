@@ -14,9 +14,10 @@ monorepo:
 - **Axon Panel** (`panel/`) — SvelteKit dashboard, one codebase built three
   ways (Cloudflare Workers / plain Node / Tauri desktop).
 
-This repo is currently a scaffold + first vertical slice, not the full v1
-target — see "Project status / scope" below before assuming something is
-implemented.
+This repo has a working vertical slice (start/stop/restart, RCON graceful
+stop, PID-file process reconciliation) plus a fully implemented backups
+subsystem (manual create/list/delete, download, restore) — see "Project
+status / scope" below before assuming something is or isn't implemented.
 
 ## Commands
 
@@ -31,7 +32,17 @@ go test ./internal/mcserver -run TestStartStopLifecycle -v   # single test
 ```
 
 Or from repo root: `make build-pulse`, `make pulse-test`,
-`make build-pulse-linux|windows|darwin` (cross-compile).
+`make build-pulse-linux|windows|darwin` (cross-compile). All `build-pulse*`
+targets inject a real version string via
+`-ldflags -X main.version=$(git describe --always --dirty)` — there are no
+release tags yet, so this is a short commit hash (+`-dirty` if the working
+tree has uncommitted changes). This is what Panel's dashboard shows as
+"Pulse vX" per agent; without it every build looks identical ("dev"), which
+made verifying what's actually deployed to a given node needlessly hard
+during this feature's development. If you build Pulse by hand (not via
+`make`) for anything other than a throwaway local test, pass the same
+`-ldflags` — e.g.
+`GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=$(git describe --always --dirty)" -o pulse ./cmd/pulse`.
 
 ### Panel (SvelteKit)
 
@@ -56,9 +67,34 @@ to node if unset). Running the *built* node-adapter server directly (not
 or SvelteKit's CSRF check rejects all form POSTs (login, enrollment,
 start/stop) with 403 — `pnpm run dev` sets this for you via Vite.
 
+Two more env vars matter for the backups feature, both Node-adapter-only,
+both with working defaults if unset:
+`AXON_LOCAL_DB_PATH` (default `<cwd>/axon-local.db`) and
+`AXON_BACKUP_HOLDING_DIR` (default `<cwd>/.backup-holding` — see "Backups"
+below for what this holds and why it's transient).
+
 Node ≥22.13 required (pnpm 11's own requirement, plus the local dev DB uses
 the `node:sqlite` builtin, stable from Node 22.5+). `corepack enable` picks
 up the pnpm version pinned in `panel/package.json`'s `packageManager` field.
+
+### Local dev/testing workflow established this feature
+
+For any change touching Pulse↔Panel interaction, spin up an **isolated
+sandbox** before touching a real dev server or a real Pulse-managed host:
+a scratch dir with its own `AXON_LOCAL_DB_PATH` and (if backups are
+involved) `AXON_BACKUP_HOLDING_DIR`, a Pulse binary pointed at a throwaway
+`pulse.instances.json` with a `sh -c "sleep N"` stand-in instance (matches
+the existing Go test philosophy — see `manager_test.go`), `HOME` overridden
+so Pulse's credential file doesn't touch `~/.config/axon`, and a short
+`--interval` (e.g. `3s`) so the heartbeat cycle doesn't make you wait. Drive
+it with `curl` against the SvelteKit form actions (they accept normal
+form-encoded POSTs, no browser needed) and query the sqlite DB directly
+with `node -e "...node:sqlite..."` to assert on outcomes. This caught real
+bugs before they ever reached a real host — worth the setup cost every
+time, especially before anything destructive (restore).
+
+`vite dev` ignores `-- --port N` when invoked via `pnpm run dev`; call the
+binary directly instead: `./node_modules/.bin/vite dev --port N`.
 
 ## Architecture
 
@@ -80,16 +116,28 @@ hand, not by shared schema/codegen: `pulse/internal/protocol/types.go` (Go)
 and `panel/src/lib/server/protocol.ts` (TypeScript).
 
 - **Heartbeat** (`POST /api/v1/heartbeat`, Pulse → Panel, ~30–60s): host
-  metrics + per-instance status array. Panel upserts `server_instances` rows
-  and returns any queued commands, marking them `sent`.
+  metrics + per-instance status array + the agent's own `interval_seconds`
+  (so Panel can compute a "next heartbeat in ~Ns" countdown instead of
+  guessing a fixed default — added for the backups UI, see below). Panel
+  upserts `server_instances` rows and returns any queued commands, marking
+  them `sent`.
 - **Command results** are piggybacked onto the *next* heartbeat
   (`pending_command_results`) rather than pushed immediately — a resolved
   design decision (simplicity over latency, matches Beacon precedent), not a
-  gap to "fix".
+  gap to "fix". **This has a real consequence to design around**: if Pulse
+  itself restarts (e.g. mid-deploy) between finishing a command and the
+  heartbeat that would report it, the result is lost and the command sits
+  at `sent` forever with no timeout. This happened during development
+  (a `delete_backup` got orphaned this way) and was fixed by hand
+  (correcting the DB to match verified on-disk reality); there's no
+  automatic recovery for it yet — see "Known gaps" below.
 - **Enrollment** (`POST /api/v1/enroll`, one-time): token → device
   credential. Enrollment tokens and device credentials are never stored
   raw, only `sha256Hex()` hashes (`panel/src/lib/server/tokens.ts` /
   `pulse/internal/credential`).
+- **Backup file transfer** (`POST /api/v1/backups/{id}/upload`, Pulse →
+  Panel, on-demand): a separate, non-JSON, non-heartbeat call — see
+  "Backups" below.
 
 ### Pulse always runs, even same-machine
 
@@ -98,6 +146,166 @@ separate process talking to Panel over `localhost` using the identical
 heartbeat contract used remotely — there is no special-cased "direct mode".
 Don't add one; the point is that adding a second machine later requires zero
 re-architecture.
+
+### Pulse forgets nothing it doesn't have to: PID-file process reconciliation
+
+`Manager` (`pulse/internal/mcserver/manager.go`) keeps instance running-state
+purely in memory. Naively, that means **every Pulse restart** (binary
+upgrade, crash, host reboot) forgets whether a real Minecraft process is
+still running underneath it — discovered the hard way when deploying this
+feature's own binary updates kept losing track of a real, live
+`bedrock_server` process. Fixed with `Manager.Reconcile()`
+(`pulse/internal/mcserver/pidfile.go` + the `Reconcile`/`watchReattached`
+methods in `manager.go`):
+
+- `Start()` writes a small JSON PID file (`.pulse-pid`, inside
+  `working_dir`) recording the spawned PID and command; the exit-detection
+  goroutine removes it on exit.
+- On startup, call `manager.Reconcile()` (after `NewManager`, before the
+  heartbeat loop) — for each configured instance, read its `.pulse-pid` if
+  present, and adopt the process (mark it Running, no restart) if it's
+  still alive **and** its command's base executable name matches what's
+  configured (`processMatches` in `pidfile.go`) — a best-effort fingerprint
+  guarding against PID-reuse-after-reboot false positives. Uses
+  `github.com/shirou/gopsutil/v3/process` (already a dependency via
+  `internal/inventory`) for the cross-platform liveness/cmdline check
+  rather than hand-rolled unix/windows syscalls.
+- An adopted process has no `*exec.Cmd` (Pulse isn't its parent, so
+  `cmd.Wait()` would fail with ECHILD once the *original* Pulse process
+  that spawned it is gone) — `watchReattached` polls liveness every 2s
+  instead. `Stop()`/`gracefulStop` were refactored to take a bare `pid int`
+  rather than `*exec.Cmd` (`terminate()` in `process_unix.go` /
+  `process_windows.go` likewise), so stopping works identically whether
+  Pulse spawned the process this run or adopted it.
+- **One-time bootstrap gap, not a recurring bug**: a process spawned by a
+  *pre-reconciliation* Pulse binary never got a PID file written for it, so
+  the very first restart onto the new binary still needs a **manual**
+  one-time PID-file seed (`echo '{"pid":N,"command":["..."]}' > .pulse-pid`
+  as the process owner) before `Reconcile()` has anything to find. Every
+  Pulse restart *after* that self-heals correctly, since every process it
+  spawns from then on gets a real PID file automatically.
+
+### Backups (implemented: manual create/list/delete, download, restore)
+
+Full design lived in a plan doc during development; the durable summary is
+here. Four foundational decisions, all still load-bearing:
+
+1. **Pulse's disk is the only durable copy.** Panel never stores backup
+   bytes persistently — only transiently, for an active download (see
+   below). This avoids duplicate storage and matches the
+   no-inbound-connections principle: Pulse pushes bytes to Panel on
+   request, Panel never reaches into Pulse.
+2. **Scheduling (when built) is Panel-owned**, evaluated inline during
+   heartbeat handling — no new Go dependency in Pulse, fits the
+   request-driven (no persistent timers) design Cloudflare compatibility
+   requires. **Not built yet** — see "Project status" below.
+3. **Backup scope is the whole `working_dir`** (world + server.properties +
+   plugins/mods/configs), tar+gzip, stdlib only
+   (`archive/tar`+`compress/gzip`), excluding `logs/`, `crash-reports/`,
+   `session.lock`, `pulse.log` (matched by base name at any depth — see
+   `excludeNames` in `pulse/internal/backup/engine.go`).
+4. **Cloudflare gets a clean 501, not a half-working feature.** The two
+   routes that need a real filesystem
+   (`api/v1/backups/[backupId]/upload`, `backups/[backupId]/download-file`)
+   check `platform?.env?.DB` first and refuse cleanly; backup *metadata*
+   (the `backups`/`backup_downloads` tables) is fine on D1 either way.
+
+**Why backups stop the server first, always** (`pulse/internal/backup`
+package doc): Java Edition's RCON `save-off`/`save-all` pause-writes
+convention is not supported by Bedrock Dedicated Server's RCON. Rather than
+branching backup behavior per edition, `backup_instance` and
+`restore_backup` both: stop the instance if running (reusing
+`gracefulStop`, which already works correctly on both editions) → do the
+archive/restore work with nothing writing to disk → restart afterward
+*only for backup*, restore always leaves it stopped (the admin should look
+at a restored world before deciding to bring it back up). This is simpler
+and edition-agnostic, at the cost of a brief stop/restart cycle for a
+backup taken while running.
+
+**A structural UX consequence of the above**: because the whole
+stop→archive→restart cycle happens *between* two heartbeats, Pulse's own
+`running_state` reporting frequently never has a chance to show
+"stopping"/"starting" for it at all — the wire state just jumps straight
+from `running` to `running` across two heartbeats with nothing observable
+in between. **Don't try to fix this by making Pulse report faster; it
+structurally can't** (it doesn't know about the command until after that
+heartbeat's status snapshot is already built). The fix used throughout
+this feature: derive "is something happening to this instance" from
+**Panel's own command/backup tracking**, independent of `running_state`.
+See `panel/src/routes/+page.server.ts`'s `instancesBackingUp`/
+`pendingActions` and the "Backing up…"/"Restoring…"/"Starting…" badges
+that replace (not stack next to) the normal status badge on the dashboard.
+Same reasoning applies to plain start/stop/restart — a `restart_instance`
+click can fully resolve within one heartbeat gap too.
+
+**Push-backup transfer** (download): admin clicks Download →
+`downloadBackup` action queues a `push_backup` command and inserts a
+`backup_downloads` row (`status='requested'`, `requestedAt`, and an
+`expiresAt` safety-net deadline set immediately in case it never becomes
+ready — see `panel/src/lib/server/backupDownloads.ts`) → Pulse's next
+heartbeat picks up the command → `protocol.Client.PushBackup` streams the
+file to `POST /api/v1/backups/{id}/upload` (bearer device-credential
+auth + an `X-Axon-Instance-Id` header Panel cross-checks) → upload route
+streams straight to Panel's local holding dir
+(`AXON_BACKUP_HOLDING_DIR`) → marks the row `ready` with a fresh 10-minute
+TTL → client-side polling (unconditional, not just "while known
+in-flight" — see "Known gaps") notices `ready` and **auto-triggers** the
+actual browser download (hidden `<a download>` + `.click()`) rather than
+making the admin click twice. `GET /backups/{id}/download-file` streams
+the held file back with delivery-confirmed cleanup (unlink + mark
+`expired` on stream `end`); a heartbeat-piggybacked sweep
+(`pruneExpiredDownloads`) is the backstop for holds nobody ever collects.
+
+**One real bug avoided, not just noted**: `protocol.Client`'s shared
+`http.Client` has a blanket 15s timeout — fine for small JSON
+enroll/heartbeat calls, would silently abort a multi-GB backup upload
+partway through. `PushBackup` uses a **separate** `http.Client` with no
+timeout (`uploadHTTPClient` in `pulse/internal/protocol/client.go`) rather
+than raising the shared one, so a hung heartbeat still fails fast.
+
+**Restore** (`executeRestore` in `pulse/cmd/pulse/main.go`, `Engine.Restore`
++ `extract()` in `pulse/internal/backup/engine.go`): stop (if running) →
+take an automatic **pre-restore safety backup** first (Panel pregenerates
+its id and passes it in the payload, so Pulse never invents ids — matches
+the convention every other backup command already follows) → wipe
+`working_dir` and extract the target archive in place (**exact rollback,
+not a merge** — anything created after the target backup was taken is
+gone) → leave stopped regardless of prior state. The safety backup's
+size/checksum are reported in the `CommandResult` **whenever that step
+itself succeeded**, independent of the overall `Success` flag — so Panel
+still records a real, usable safety backup even if the *extract* step
+afterward fails. A failed restore (bad id, disk error) never touches
+`working_dir` — verified explicitly in both unit tests
+(`TestRestoreUnknownBackupFailsWithoutTouchingWorkingDir` in
+`pulse/internal/backup/engine_test.go`) and a full sandboxed HTTP-level
+test before this ever touched a real host.
+
+**Confirming a restore uses a themed modal**
+(`panel/src/lib/components/ConfirmModal.svelte`), not the browser's native
+`confirm()` — see STYLE.md.
+
+### Deploying Pulse to a real host — currently fully manual
+
+There's no CI/CD or auto-update pipeline yet. The established flow for this
+feature's iteration: cross-compile with the `-X main.version=...` ldflags
+above, `scp` to `<host>:/tmp/pulse-new`, verify the `sha256sum` matches on
+both ends, then hand the actual privileged swap to the human — **`sudo`
+commands run over SSH to a remote host are blocked by the auto-mode
+permission classifier**, by design (this is correct behavior, not a bug to
+route around). The swap itself:
+
+```sh
+sudo mv /tmp/pulse-new /usr/local/bin/pulse
+sudo chown root:root /usr/local/bin/pulse && sudo chmod 755 /usr/local/bin/pulse
+sudo kill <old-pid>
+sudo -u <service-user> bash -c 'nohup /usr/local/bin/pulse --server-url <url> --config <path> --interval 30s > <logfile> 2>&1 & disown'
+```
+
+No `--enroll-token` needed on restart — the saved credential carries over.
+Verify the swap by checking `Reconcile()` logged an adoption
+(`reconciled instance "X" with already-running pid N`) if a game server
+process was already running, and that Panel's `last_seen_at` updates again
+shortly after.
 
 ### Panel: one codebase, three adapters, one DB abstraction
 
@@ -118,25 +326,48 @@ a native build step requiring network access to download prebuilt headers
 that isn't guaranteed on every target machine. Both paths share the same
 Drizzle schema (`panel/src/lib/server/db/schema.ts`). Local dev also
 self-applies `migrations/*.sql` on startup (idempotent, tolerates "already
-exists"); the Cloudflare target uses real `wrangler d1 migrations apply`.
+exists" **and** "duplicate column name" — the latter added this feature,
+since it's the first schema change to use `ALTER TABLE ... ADD` rather
+than only `CREATE TABLE`; without it, a long-running local dev server would
+crash on its second restart after any future additive column change).
+`scripts/seed-dev.mjs` has the identical tolerance list, kept in sync by
+hand.
 
 Migrations are drizzle-kit-generated (`pnpm run db:generate`, config in
 `panel/drizzle.config.ts`) into the repo-root `migrations/` directory — one
-source of truth shared by D1 and the local sqlite bootstrap.
+source of truth shared by D1 and the local sqlite bootstrap. **A
+long-running local dev server only applies migrations once, at process
+startup** — after adding a migration, restart the dev server (not just
+save the file) or new columns/tables won't exist in that process's
+connection yet. Bit twice during this feature's development.
 
 ### Command layers (conceptually distinct — don't collapse them)
 
 1. **Process-level** — Pulse manages the OS process directly
    (`pulse/internal/mcserver/`): install, start/stop/restart,
-   stdout/stderr capture. No Minecraft protocol involved. Only
-   `start_instance`/`stop_instance` exist today; graceful stop is a bare
-   SIGTERM/Kill placeholder (`terminate()` in `process_unix.go` /
-   `process_windows.go`) until RCON lands — it should become "save-all" +
-   "stop" over RCON, not stdin piping.
-2. **Console commands (RCON)** — not implemented yet. Will connect to the
-   running server's RCON port rather than piping stdin, so it works
-   uniformly across Vanilla/Paper/Forge/Fabric.
-3. **In-game/gameplay commands** — no separate code path; anything typeable
+   stdout/stderr capture, PID-file reconciliation (see above). Command
+   types: `start_instance`, `stop_instance`, `restart_instance` (stops
+   first only if running, otherwise behaves like a plain start — safe to
+   route every "Restart" click through this one type regardless of current
+   state), plus the backup-family types below. Graceful stop
+   (`gracefulStop()` in `rcon_stop.go`) issues RCON `save-all` + `stop`
+   when the instance's `server.properties` has `enable-rcon=true` and a
+   non-empty `rcon.password`, falling back to the bare SIGTERM/Kill signal
+   (`terminate()` in `process_unix.go` / `process_windows.go`) otherwise.
+2. **Backup lifecycle** — its own command family, layered on top of
+   process-level: `backup_instance`, `restore_backup`, `delete_backup`,
+   `push_backup`. See "Backups" above. Implemented in
+   `pulse/internal/backup/` (archiving/restore mechanics, no
+   process-lifecycle awareness of its own) + handler functions in
+   `pulse/cmd/pulse/main.go` (`executeBackup`, `executeRestore`,
+   `executePushBackup` — these own the stop/restart orchestration around
+   the mechanics).
+3. **Console commands (RCON)** — a raw admin console (arbitrary command
+   input, not just graceful stop) is not implemented yet. The RCON client
+   itself exists (`pulse/internal/rcon/`) and connects to the running
+   server's RCON port rather than piping stdin, so it works uniformly
+   across Vanilla/Paper/Forge/Fabric; only graceful stop uses it so far.
+4. **In-game/gameplay commands** — no separate code path; anything typeable
    with `/` in-game rides the same RCON layer once that exists.
 
 ### Auth: single admin, no roles (v1 decision)
@@ -145,9 +376,18 @@ source of truth shared by D1 and the local sqlite bootstrap.
 (`adminSessions`, id = sha256 of the cookie token, not the raw token).
 `hooks.server.ts` gates every route except `/login` and `/api/v1/*`, which
 authenticate Pulse agents via their own bearer device credentials instead of
-the session cookie. `/api/v1/commands` is the one exception inside that
-namespace — it's admin-facing (dashboard start/stop buttons), so it
+the session cookie. `/api/v1/commands` is one exception inside that
+namespace — it's admin-facing (dashboard start/stop/restart buttons), so it
 re-checks `isAuthenticated()` itself rather than relying on the hook.
+`backups/[backupId]/download-file` is admin-session-authenticated normally
+(it's outside `/api/v1/*`, so the hook covers it automatically) even though
+the *bytes* originated from Pulse — only `api/v1/backups/[backupId]/upload`
+(the Pulse-initiated ingest side) uses bearer device-credential auth.
+
+Still single-admin — no per-user settings, no roles. The **Settings** page
+(`/settings`) exists now (see below) but only holds global,
+admin-instance-wide config (enrollment token generation, theme), not
+anything resembling multi-user preferences.
 
 ### Theming
 
@@ -159,7 +399,8 @@ meaningful under a red/orange palette like Nether. New palettes are pure
 additive CSS blocks, no component changes needed. Palettes are named by
 color character (Classic/End/Nether), not exact in-game names — a
 trademark consideration for the OSS project; keep that convention for new
-palettes.
+palettes. The theme switcher itself now lives on `/settings`, not the
+dashboard header (see STYLE.md).
 
 ## Coding conventions established so far
 
@@ -169,30 +410,77 @@ palettes.
   Beacon's pattern. Admin passwords use `scrypt` (`hashPassword`/
   `verifyPassword`, same file). Follow this for any new credential type.
 - **Server-only code lives under `panel/src/lib/server/`**, one small
-  module per concern (`db/`, `auth.ts`, `tokens.ts`, `http.ts`, `commands.ts`,
-  `protocol.ts`) — imported only from `+server.ts` / `+page.server.ts` /
-  `hooks.server.ts`, never from `.svelte` files.
+  module per concern (`db/`, `auth.ts`, `tokens.ts`, `http.ts`,
+  `commands.ts`, `protocol.ts`, `backupDownloads.ts`) — imported only from
+  `+server.ts` / `+page.server.ts` / `hooks.server.ts`, never from
+  `.svelte` files. **Client-safe shared logic** (no server-only imports,
+  usable from any `.svelte` file) goes directly under `panel/src/lib/`
+  instead — see `heartbeat.ts` (pure timing-math functions shared by the
+  dashboard and the backups page) for the pattern.
 - **Shared DB mutations get extracted into a `lib/server/*.ts` helper**
   and called from both a form action and a REST route rather than
-  duplicated — see `queueCommand()` in `commands.ts`, used by both
-  `+page.server.ts`'s `queueCommand` action and
-  `api/v1/commands/+server.ts`. Follow this shape for future mutations
-  (e.g. a future RCON dispatch or backup-trigger endpoint).
+  duplicated — see `queueCommand()` in `commands.ts`, used by every
+  command-queueing form action across the dashboard, instance detail page,
+  and `api/v1/commands/+server.ts`. Follow this shape for future
+  mutations. `queueCommand()` returns the new command's id (needed so
+  callers can stamp `commandId` onto a `backups` row they're inserting in
+  the same action — see `createBackup`/`restoreBackup` in
+  `instances/[serverInstanceId]/+page.server.ts`).
+- **Node-only server code (real filesystem access) uses dynamic
+  `import('node:...')` inside the function body**, never a static
+  top-level import — this is what lets the Cloudflare adapter bundle
+  cleanly despite these modules existing in the shared codebase. Established
+  by `db/index.ts`'s `node:sqlite` handling, followed by
+  `backupDownloads.ts` and the upload/download-file routes for
+  `node:fs`/`node:path`/`node:stream`. Guard the Cloudflare-unsupported
+  path with `if (platform?.env?.DB) throw error(501, '...')` *before* any
+  dynamic import, so the check itself has zero Node-specific surface.
 - **Admin-facing mutations are SvelteKit form actions with `use:enhance`**,
   not client-side `fetch()` calls to a JSON API. The `/api/v1/*` routes are
   reserved for cross-boundary callers (Pulse agents, bearer-token
   authenticated) — `/api/v1/commands` is the one route that also accepts
   admin session auth, documented there as the deliberate exception, not the
-  norm.
+  norm. **A destructive confirmation uses the themed `ConfirmModal`
+  component**, not the browser's native `confirm()` — see STYLE.md.
 - **Heartbeat-driven upserts use a composite string id**:
   `` `${pulseAgentId}:${instanceId}` `` as the `server_instances` primary
-  key, via `onConflictDoUpdate`. Use the same "prefix:localId" shape for
-  any future per-agent-scoped resource Panel needs to key on.
+  key, via `onConflictDoUpdate`. The same shape is reused for
+  `backupSchedules.id` if/when Phase 4 lands. Use the same
+  "prefix:localId" shape for any future per-agent-scoped resource Panel
+  needs to key on.
+- **Panel-owned ids for anything Pulse creates on request**: Panel always
+  generates the id (`bkp_<random>` via `newBackupId()` in `commands.ts`)
+  *before* queuing a command that will create something, and Pulse uses it
+  verbatim (as its on-disk filename stem, for backups) rather than
+  inventing its own. Keeps Pulse "dumb" and avoids a round-trip just to
+  learn an id. Follow this for any future Pulse-side creation.
+- **A command's wire `payload` is a JSON-stringified column
+  (`commands.payload`)**, `null` for payload-less types (start/stop).
+  Parse with the matching `*CommandPayload` TS interface from
+  `protocol.ts` (`BackupCommandPayload`, `RestoreCommandPayload`). This
+  plumbing (DB column → `queueCommand()` param → heartbeat handler's
+  `wireCommands` mapping) existed in the wire-type structs before it
+  actually worked end-to-end — don't assume a wire-type field is actually
+  plumbed through; check the DB schema and every hop.
+- **A destructive/state-changing wire command reports enough in its
+  `CommandResult` for Panel to fully resolve the corresponding DB
+  row(s) without a second round-trip** — extend `CommandResult`'s optional
+  fields (`size_bytes`, `checksum`) rather than adding a parallel reporting
+  channel, and structure Pulse's result-building so those fields are
+  populated based on which *step* succeeded, not just the command's
+  overall pass/fail (see restore's safety-backup reporting above).
 - **Go: one `internal/<concern>/` package per concern**
-  (`protocol`, `credential`, `mcserver`, `inventory`), platform-specific
-  behavior split into `_unix.go` / `_windows.go` files with build tags
-  rather than runtime `if runtime.GOOS` branching (see
-  `mcserver/process_unix.go` vs `process_windows.go`).
+  (`protocol`, `credential`, `mcserver`, `inventory`, `backup`, `rcon`),
+  platform-specific behavior split into `_unix.go` / `_windows.go` files
+  with build tags rather than runtime `if runtime.GOOS` branching (see
+  `mcserver/process_unix.go` vs `process_windows.go`). A command handler
+  that orchestrates process-lifecycle + another package's mechanics (stop →
+  do the thing → maybe restart) lives in `cmd/pulse/main.go`, not inside
+  the mechanics package itself — `backup.Engine` has zero
+  process-lifecycle awareness by design; `main.go`'s `executeBackup`/
+  `executeRestore` own that orchestration. Keeps the mechanics package
+  testable without a real process, and keeps "should this stop the
+  server first" as one visible decision per command type.
 - **Wire types are hand-mirrored, not codegenned**: Go structs in
   `pulse/internal/protocol/types.go` and TS interfaces in
   `panel/src/lib/server/protocol.ts` must be updated together, same
@@ -201,31 +489,74 @@ palettes.
   to update both files for any wire-shape change.
 - **Go tests avoid needing a real Minecraft server**: `manager_test.go`
   drives `mcserver.Manager` against a trivial `sh -c "sleep N"` stand-in
-  process. Keep using cheap stand-ins for process-lifecycle tests rather
-  than requiring a real server jar.
+  process; `pulse/internal/backup/engine_test.go` and
+  `pulse/cmd/pulse/main_test.go` follow the same pattern for backup
+  create/restore. Keep using cheap stand-ins for process-lifecycle tests
+  rather than requiring a real server jar. For anything destructive
+  (restore), pair the unit tests with a full sandboxed HTTP-level run
+  (see "Local dev/testing workflow" above) before it ever touches a real
+  host.
+- **A "why isn't this happening" report that turns out to be timing, not a
+  bug, is common with this architecture** — before changing code, check
+  actual DB timestamps (`commands.sent_at`/`completed_at`,
+  `backup_downloads.requested_at`/`ready_at`) against `now` and the
+  agent's heartbeat interval before assuming something's broken. Several
+  "it's stuck" reports during this feature turned out to be normal
+  heartbeat-cycle latency, or (once) an actual multi-second-relayed
+  network path — not a code defect.
 - **CSS custom properties are prefixed `--axon-*`** (see `STYLE.md` for the
-  full palette/spacing conventions).
+  full palette/spacing/component conventions, including this feature's
+  additions: progress bars, pulsing badges, modals, icon buttons).
+
+## Known gaps (real, not yet fixed — don't assume otherwise)
+
+- **No timeout on `sent` commands.** If Pulse dies between finishing a
+  command and the heartbeat that would report it, that command (and any
+  DB row gated on it, e.g. a `backupDownloads` row) is orphaned forever
+  with no automatic recovery. Happened once for real during this
+  feature's development; fixed by hand. A lightweight fix (auto-fail a
+  command `sent` for longer than a few heartbeat intervals) was proposed
+  but not built.
+- **Scheduling/retention (backups Phase 4) is not built.** No
+  `backupSchedules` table, no due-check, no automatic pruning, no "Apply
+  Retention Now" button. The mockup reference (see below) and this file's
+  "Backups" section both assume it's coming; it isn't there yet.
+- **Restore has never been run against nimo's real backups** (only the
+  isolated sandbox, thoroughly) — deliberately left to the user to trigger
+  first, given it's destructive even with the safety-backup net.
 
 ## Project status / scope
 
-Deliberately implemented in this vertical slice, verified end-to-end
-locally (seed admin → log in → generate token → run pulse → enroll →
-heartbeat → start → confirm running → stop → confirm stopped) and in CI:
+Deliberately implemented, verified end-to-end locally and (mostly) against
+a real production Bedrock server ("nimo", home LAN, Tailscale-reachable):
 
-- Pulse: enrollment, heartbeat, start/stop of one or more configured
-  Minecraft processes. `go build/vet/test` clean.
-- Panel: single-admin auth, enrollment token generation, dashboard listing
-  agents/instances, start/stop command queueing, 3 working theme palettes.
-  `svelte-check` clean; both `ADAPTER=node` and `ADAPTER=cloudflare` builds
-  pass in CI (`.github/workflows/ci.yml`).
-- Repo pushed to `codenexus/axon` (private), `main` branch, with root/pulse/
-  panel READMEs and this file.
+- **Pulse**: enrollment, heartbeat (now reporting its own `--interval`),
+  start/stop/restart of configured Minecraft processes, RCON graceful stop,
+  PID-file process reconciliation across Pulse's own restarts, full backup
+  lifecycle (create/list/delete/download/restore) per "Backups" above.
+  `go build/vet/test` clean, including Windows/macOS cross-compiles.
+- **Panel**: single-admin auth, enrollment token generation (now on
+  `/settings`), dashboard listing agents/instances with online/offline
+  status + accurate in-flight badges, start/stop/restart controls, a
+  per-instance backups page (`/instances/[serverInstanceId]`) with
+  create/list/delete/download/restore, a themed confirm modal, 3 working
+  theme palettes. `svelte-check` clean; both `ADAPTER=node` and
+  `ADAPTER=cloudflare` builds pass.
+- Repo pushed to `codenexus/axon` (private), `main` branch.
 
 Deliberately deferred — don't assume half-built unless you find code for it:
 
-- RCON console commands, backups, self-update, file management
-  (plugins/mods browsing, uploads), multi-user auth/RBAC, mDNS/Bonjour
-  discovery, Java-prerequisite install flow, Tauri sidecar process spawning.
+- **Backup scheduling + retention** (keep-count/keep-days automatic
+  pruning, "Apply Retention Now") — the next logical piece, see "Known
+  gaps".
+- A raw RCON console UI (arbitrary command input) plus dedicated
+  whitelist/op/ban forms, file management (plugins/mods browsing,
+  uploads), multi-user auth/RBAC, mDNS/Bonjour discovery, Java-prerequisite
+  install flow, Tauri sidecar process spawning, self-update, a stale-command
+  timeout (see "Known gaps"), and a "Systems"-style multi-node overview
+  page (the current dashboard already lists multiple agents, but nothing
+  like the old mockup's dedicated node-detail/diagnostic-command view
+  exists).
 
 See `PROJECT_LOG.md` for session-by-session history and next steps, and
 `STYLE.md` for UI/UX conventions.

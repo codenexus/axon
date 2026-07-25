@@ -2,8 +2,10 @@
 
 UI/UX and styling conventions for Axon Panel. Established from the first
 vertical slice (`panel/src/routes/+page.svelte`, `login/+page.svelte`,
-`lib/theme/`) — follow these rather than introducing new patterns per
-component.
+`lib/theme/`) and extended by the backups feature
+(`instances/[serverInstanceId]/+page.svelte`, `settings/+page.svelte`,
+`lib/components/ConfirmModal.svelte`) — follow these rather than
+introducing new patterns per component.
 
 ## Theming
 
@@ -39,6 +41,13 @@ component.
 - Auth pages (login) center a single card in the viewport
   (`min-height: 100vh; display: flex; align-items: center; justify-content:
   center`), card width `min(360px, 90vw)`.
+- **Detail pages** (a page one level below the dashboard, e.g.
+  `/instances/[serverInstanceId]`, `/settings`) open with a breadcrumb back
+  to the dashboard: `<p class="breadcrumb"><a href="/">← Dashboard</a></p>`
+  above the page `<h1>`, `.breadcrumb a` styled `color: var(--axon-text);
+  opacity: 0.7` (no underline emphasis — it's a secondary nav affordance,
+  not a primary action). Content below the header goes in one or more
+  `.card` sections, same card recipe as the dashboard's agent cards.
 
 ## Spacing & radius scale
 
@@ -75,13 +84,77 @@ Stick to these values rather than inventing new ones:
   `color: var(--axon-status-error)`.
 - **Inputs**: padding `0.5rem 0.625rem`, `border-radius: 0.375rem`,
   `border: 1px solid var(--axon-accent)`, `background: var(--axon-background)`.
+- **Ghost link** (`.ghost-link`): the anchor-tag equivalent of a `.ghost`
+  button, for navigation/actions that render as a link rather than a form
+  submit (e.g. a "Backups →" link, a ready "Download ⬇" link). Same visual
+  recipe as `.ghost`: `padding: 0.4rem 0.9rem`, `border-radius: 0.375rem`,
+  `border: 1px solid var(--axon-accent)`, `color: var(--axon-text)`,
+  `text-decoration: none`, `font-size: 0.875rem`, `display: inline-flex;
+  align-items: center`. Duplicated per-file (each route owns its own
+  `<style>` block, see below) rather than shared — keep it that way unless
+  a third file needs it and the duplication starts actively hurting.
+- **Icon button** (`.icon-link`, e.g. the dashboard header's Settings cog):
+  a square `.ghost`-styled button/link sized to just the icon —
+  `width/height: 2.1rem`, same border/radius as `.ghost`, `display:
+  inline-flex; align-items: center; justify-content: center`. Icons are
+  **inline SVG, hand-written in the markup** (`stroke="currentColor"` so
+  they follow `--axon-text` automatically across palettes) — no icon font
+  or icon library dependency. Always pair with `title`/`aria-label` since
+  there's no visible text.
+- **Pulsing badge** (`.badge-pulsing`, added to a status badge's class list
+  while that state is actively in-flight — "Pending", "Deleting…",
+  "Backing up…", "Starting…", etc.): `animation: badge-pulse 1.4s
+  ease-in-out infinite` cycling `opacity` between `1` and `0.45`, respecting
+  `@media (prefers-reduced-motion: reduce)` (animation: none). Duplicated
+  per-file alongside the badge classes themselves, same reasoning as
+  `.ghost-link` above.
+- **Heartbeat/progress bar** (`.heartbeat-bar` / `.heartbeat-bar-fill`): a
+  thin (`height: 0.3rem`) pill-shaped track (`background:
+  var(--axon-accent)`) with a fill (`background: var(--axon-status-info)`,
+  switching to `var(--axon-status-warning)` via a `.heartbeat-bar-overdue`
+  modifier once the countdown hits zero) whose `width` is driven by
+  `heartbeatProgress()` from `$lib/heartbeat.ts` and transitions smoothly
+  (`transition: width 1s linear`) rather than snapping. **Only render this
+  contextually, next to a specific pending operation** (a backup row that's
+  `pending`, an instance mid start/stop/restart, a download that's
+  `preparing`) — never as an always-visible ambient status element. An
+  earlier version showed it unconditionally per-agent on the dashboard;
+  that was explicitly walked back as unwanted 24/7 chrome. If the same
+  operation would show it on two rows at once (e.g. a restore's
+  auto-created safety-backup row *and* the backup being restored), suppress
+  it on the secondary row rather than showing the same countdown twice —
+  see `suppressRedundantBar()` in the instances detail page for the exact
+  (narrow!) condition.
+- **Modal** (`$lib/components/ConfirmModal.svelte`, the first component
+  under `lib/components/` — that directory not existing was true when this
+  file was first written, it's since been established and should be reused
+  for the next shared piece of UI, not treated as still nonexistent):
+  full-screen `.backdrop` (`position: fixed; inset: 0; background:
+  rgba(0,0,0,0.5)`) centering a `.modal` card (same card recipe:
+  `var(--axon-surface)` background, `var(--axon-accent)` border,
+  `0.75rem` radius, `max-width: 420px`). Used for destructive confirmations
+  in place of the browser's native `confirm()` — a native `confirm()` was
+  the first implementation and was explicitly called out as needing to be
+  themed instead. Props: `open`, `title`, `message`, `confirmLabel`,
+  `cancelLabel`, `danger` (styles the confirm button with
+  `--axon-status-error` instead of `--axon-primary`), `onConfirm`,
+  `onCancel`. The calling page owns *when* to show it (e.g. a button's
+  `onclick` sets a `$state` id rather than the form submitting directly)
+  and submits the real form programmatically
+  (`formEl.requestSubmit()`) from `onConfirm` — see the Restore button in
+  `instances/[serverInstanceId]/+page.svelte` for the reference
+  implementation.
 
 ## Typography & assets
 
 - Font stack: `system-ui, -apple-system, 'Segoe UI', sans-serif` — no
   custom webfont, no separate monospace stack yet (inline `<code>` uses the
   browser default monospace).
-- No component library, no utility-CSS framework (no Tailwind) — each
-  Svelte component has its own scoped `<style>` block using the palette
-  variables directly. Keep it that way rather than introducing a framework
-  mid-slice.
+- No utility-CSS framework (no Tailwind) — each route's own `.svelte` file
+  still owns its own scoped `<style>` block using the palette variables
+  directly, and that's still the default. `lib/components/` now exists for
+  genuinely cross-page shared UI (currently just `ConfirmModal.svelte`) —
+  reach for it when a second unrelated page would otherwise duplicate real
+  interactive behavior (not just CSS, which is still fine to duplicate per
+  the `.ghost-link`/`.badge-pulsing` note above), not for every small
+  visual pattern.

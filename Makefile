@@ -18,17 +18,24 @@ help:
 	@echo "  migrate-remote         apply D1 migrations to remote D1 DB"
 	@echo "  seed-dev               seed a local admin + enrollment token for dev testing"
 
+# Short commit (+ "-dirty" if the working tree has uncommitted changes) —
+# no release tags exist yet, so this is the only thing that reliably tells
+# you which exact source state a deployed binary came from. Shows up in
+# Panel's dashboard as "Pulse v<this>" via the heartbeat's pulse_version
+# field, otherwise every build looks identical ("dev").
+PULSE_VERSION := $(shell git describe --always --dirty 2>/dev/null || echo dev)
+
 build-pulse:
-	cd pulse && go build -o dist/pulse ./cmd/pulse
+	cd pulse && go build -ldflags="-X main.version=$(PULSE_VERSION)" -o dist/pulse ./cmd/pulse
 
 build-pulse-linux:
-	cd pulse && GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/pulse-linux-amd64 ./cmd/pulse
+	cd pulse && GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=$(PULSE_VERSION)" -o dist/pulse-linux-amd64 ./cmd/pulse
 
 build-pulse-windows:
-	cd pulse && GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/pulse-windows-amd64.exe ./cmd/pulse
+	cd pulse && GOOS=windows GOARCH=amd64 go build -ldflags="-s -w -X main.version=$(PULSE_VERSION)" -o dist/pulse-windows-amd64.exe ./cmd/pulse
 
 build-pulse-darwin:
-	cd pulse && GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o dist/pulse-darwin-arm64 ./cmd/pulse
+	cd pulse && GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w -X main.version=$(PULSE_VERSION)" -o dist/pulse-darwin-arm64 ./cmd/pulse
 
 pulse-test:
 	cd pulse && go vet ./... && go test ./...

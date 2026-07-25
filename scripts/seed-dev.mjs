@@ -27,7 +27,10 @@ if (existsSync(migrationsDir)) {
 			try {
 				db.exec(trimmed);
 			} catch (err) {
-				if (!String(err.message).includes('already exists')) throw err;
+				const message = String(err.message);
+				if (!message.includes('already exists') && !message.includes('duplicate column name')) {
+					throw err;
+				}
 			}
 		}
 	}

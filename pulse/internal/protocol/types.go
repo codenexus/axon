@@ -67,6 +67,11 @@ type HeartbeatRequest struct {
 	PulseVersion string           `json:"pulse_version"`
 	Host         HostMetrics      `json:"host"`
 	Instances    []InstanceStatus `json:"instances"`
+	// IntervalSeconds is this agent's configured --interval (the sleep
+	// between heartbeats), so Panel can show a "next heartbeat in ~Ns"
+	// countdown rather than guessing a fixed default — it's a per-agent
+	// CLI flag, otherwise invisible to Panel.
+	IntervalSeconds int `json:"interval_seconds"`
 	// PendingCommandResults are results from previously-polled commands,
 	// piggybacked onto the next heartbeat rather than pushed immediately
 	// (see spec open question #3 — resolved as next-poll-cycle for v1).
@@ -77,13 +82,32 @@ type CommandResult struct {
 	CommandID string `json:"command_id"`
 	Success   bool   `json:"success"`
 	Message   string `json:"message,omitempty"`
+	// SizeBytes and Checksum are set on a successful backup_instance result.
+	SizeBytes int64  `json:"size_bytes,omitempty"`
+	Checksum  string `json:"checksum,omitempty"` // sha256 hex
 }
 
 type Command struct {
 	ID         string          `json:"id"`
-	Type       string          `json:"type"` // "start_instance" | "stop_instance"
+	Type       string          `json:"type"` // "start_instance" | "stop_instance" | "restart_instance" | "backup_instance" | "restore_backup" | "delete_backup" | "push_backup"
 	InstanceID string          `json:"instance_id"`
 	Payload    json.RawMessage `json:"payload,omitempty"`
+}
+
+// BackupCommandPayload is the Payload shape for "backup_instance",
+// "delete_backup", and "push_backup". Panel always generates BackupID
+// before queuing the command; Pulse uses it verbatim as the on-disk
+// filename stem, never inventing its own id.
+type BackupCommandPayload struct {
+	BackupID string `json:"backup_id"`
+}
+
+// RestoreCommandPayload is the Payload shape for "restore_backup". Panel
+// also pregenerates SafetyBackupID for the automatic pre-restore backup, so
+// Pulse never invents ids itself.
+type RestoreCommandPayload struct {
+	BackupID       string `json:"backup_id"`
+	SafetyBackupID string `json:"safety_backup_id"`
 }
 
 type HeartbeatResponse struct {

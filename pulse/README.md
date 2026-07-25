@@ -20,6 +20,9 @@ reuse the saved credential and `--enroll-token` is no longer needed.
 ## Status
 
 Vertical slice: enrollment, heartbeat with host metrics, and `start_instance`
-/ `stop_instance` commands against a locally-configured process. Not yet
-implemented: RCON console commands, backups, self-update, file management,
-mDNS discovery.
+/ `stop_instance` commands against a locally-configured process. Stopping a
+running instance now attempts a graceful RCON `save-all` + `stop` (reading
+`rcon.port`/`rcon.password` from the instance's `server.properties` when
+`enable-rcon=true`), falling back to a bare process signal when RCON isn't
+configured or reachable. Not yet implemented: a raw RCON console, backups,
+self-update, file management, mDNS discovery.

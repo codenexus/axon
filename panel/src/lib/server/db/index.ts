@@ -41,7 +41,12 @@ async function getLocalDb(): Promise<Db> {
 							sqlite.exec(trimmed);
 						} catch (err) {
 							const message = err instanceof Error ? err.message : String(err);
-							if (!message.includes('already exists')) throw err;
+							// Tolerate re-running a CREATE TABLE ("already exists") or an
+							// ALTER TABLE ... ADD ("duplicate column name") on a DB that
+							// already has this migration applied.
+							if (!message.includes('already exists') && !message.includes('duplicate column name')) {
+								throw err;
+							}
 						}
 					}
 				}

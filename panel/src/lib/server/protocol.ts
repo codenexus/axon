@@ -49,6 +49,22 @@ export interface CommandResult {
 	command_id: string;
 	success: boolean;
 	message?: string;
+	// Set on a successful backup_instance result.
+	size_bytes?: number;
+	checksum?: string; // sha256 hex
+}
+
+// Payload shape for backup_instance / delete_backup / push_backup commands.
+// Panel always generates backup_id before queuing.
+export interface BackupCommandPayload {
+	backup_id: string;
+}
+
+// Payload shape for restore_backup. Panel also pregenerates
+// safety_backup_id for the automatic pre-restore backup.
+export interface RestoreCommandPayload {
+	backup_id: string;
+	safety_backup_id: string;
 }
 
 export interface HeartbeatRequestBody {
@@ -57,6 +73,9 @@ export interface HeartbeatRequestBody {
 	pulse_version: string;
 	host: HostMetrics;
 	instances: InstanceStatus[] | null;
+	// Agent's configured --interval, so Panel can show a "next heartbeat"
+	// countdown instead of guessing a fixed default.
+	interval_seconds: number;
 	pending_command_results?: CommandResult[] | null;
 }
 

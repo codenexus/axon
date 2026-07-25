@@ -8,6 +8,27 @@
       "when": 1784661776750,
       "tag": "0000_legal_wendell_rand",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1784851824014,
+      "tag": "0001_thin_spirit",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1784857473605,
+      "tag": "0002_slow_korath",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1784860051589,
+      "tag": "0003_gigantic_baron_zemo",
+      "breakpoints": true
     }
   ]
 }

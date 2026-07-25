@@ -31,6 +31,7 @@ export const pulseAgents = sqliteTable('pulse_agents', {
 	deviceCredentialHash: text('device_credential_hash').notNull(),
 	pulseVersion: text('pulse_version').notNull(),
 	lastSeenAt: integer('last_seen_at'),
+	intervalSeconds: integer('interval_seconds'),
 	cpuUsagePercent: real('cpu_usage_percent'),
 	cpuCores: integer('cpu_cores'),
 	ramTotalBytes: integer('ram_total_bytes'),
@@ -58,10 +59,46 @@ export const commands = sqliteTable('commands', {
 	id: text('id').primaryKey(),
 	pulseAgentId: text('pulse_agent_id').notNull(),
 	instanceId: text('instance_id').notNull(),
-	type: text('type').notNull(), // "start_instance" | "stop_instance"
+	// "start_instance" | "stop_instance" | "restart_instance" | "backup_instance" | "restore_backup" | "delete_backup" | "push_backup"
+	type: text('type').notNull(),
+	// JSON-stringified command-specific payload (e.g. BackupCommandPayload); null for start/stop.
+	payload: text('payload'),
 	status: text('status').notNull(), // "queued" | "sent" | "completed" | "failed"
 	resultMessage: text('result_message'),
 	createdAt: integer('created_at').notNull(),
 	sentAt: integer('sent_at'),
 	completedAt: integer('completed_at')
+});
+
+export const backups = sqliteTable('backups', {
+	id: text('id').primaryKey(), // bkp_<random> — also the Pulse-side filename stem
+	pulseAgentId: text('pulse_agent_id').notNull(),
+	instanceId: text('instance_id').notNull(), // Pulse-local instance id
+	serverInstanceId: text('server_instance_id').notNull(), // `${pulseAgentId}:${instanceId}`, for per-instance list queries
+	status: text('status').notNull(), // "pending" | "running" | "complete" | "failed"
+	trigger: text('trigger').notNull(), // "manual" | "scheduled" | "pre_restore"
+	pendingOperation: text('pending_operation'), // null | "restore" | "delete" — set while a command is in flight for this backup
+	commandId: text('command_id'), // id of the commands row currently driving this backup's lifecycle
+	sizeBytes: integer('size_bytes'),
+	checksumSha256: text('checksum_sha256'),
+	errorMessage: text('error_message'),
+	createdAt: integer('created_at').notNull(),
+	completedAt: integer('completed_at')
+});
+
+// Transient — Pulse pushes the backup file here on request rather than
+// Panel storing a durable second copy (see CLAUDE.md's push-backup design:
+// Pulse's own disk is the source of truth). A second download request for
+// the same backup reuses/overwrites this row, hence backupId as the PK
+// rather than a separate generated id.
+export const backupDownloads = sqliteTable('backup_downloads', {
+	backupId: text('backup_id').primaryKey(),
+	pulseAgentId: text('pulse_agent_id').notNull(), // denormalized for the upload endpoint's auth check
+	status: text('status').notNull(), // "requested" | "ready" | "expired" | "failed"
+	filePath: text('file_path'), // absolute path in Panel's local holding dir, set once ready
+	sizeBytes: integer('size_bytes'),
+	errorMessage: text('error_message'),
+	requestedAt: integer('requested_at').notNull(),
+	readyAt: integer('ready_at'),
+	expiresAt: integer('expires_at')
 });

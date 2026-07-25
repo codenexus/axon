@@ -1,9 +1,31 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
-	import ThemeSwitcher from '$lib/theme/ThemeSwitcher.svelte';
-	import type { ActionData, PageData } from './$types';
+	import { invalidateAll } from '$app/navigation';
+	import { heartbeatProgress, isOnline as isAgentOnline, nextHeartbeatLabel } from '$lib/heartbeat';
+	import type { PageData } from './$types';
 
-	let { data, form }: { data: PageData; form: ActionData } = $props();
+	let { data }: { data: PageData } = $props();
+
+	// Poll unconditionally while the dashboard is open, rather than only
+	// continuing to poll once something's already known (from this page's
+	// own data) to be in-flight. That reactive-only approach missed changes
+	// triggered elsewhere (e.g. a backup queued from the instance detail
+	// page) whenever the dashboard was idle when they started — there was
+	// nothing to tell an idle page to start checking. A steady baseline
+	// poll catches all of that uniformly: start/stop transitions, backups
+	// queued from another page/tab, anything.
+	$effect(() => {
+		const interval = setInterval(() => invalidateAll(), 5000);
+		return () => clearInterval(interval);
+	});
+
+	// Local 1s tick (no network call) driving the heartbeat countdown bar
+	// shown next to a pending action, so it feels live between polls.
+	let now = $state(Date.now());
+	$effect(() => {
+		const tick = setInterval(() => (now = Date.now()), 1000);
+		return () => clearInterval(tick);
+	});
 
 	function formatBytes(bytes: number | null | undefined): string {
 		if (!bytes) return '—';
@@ -17,6 +39,25 @@
 		if (seconds < 90) return `${seconds}s ago`;
 		return `${Math.round(seconds / 60)}m ago`;
 	}
+
+	function isOnline(agent: { lastSeenAt: number | null; intervalSeconds: number | null }): boolean {
+		return isAgentOnline(agent, Date.now());
+	}
+
+	function isBusy(instance: { id: string }): boolean {
+		return !!data.instancesBackingUp[instance.id] || !!data.pendingActions[instance.id];
+	}
+
+	const backupBadgeLabel: Record<string, string> = {
+		backup: 'Backing up…',
+		restore: 'Restoring…'
+	};
+
+	const pendingActionLabel: Record<string, string> = {
+		starting: 'Starting…',
+		stopping: 'Stopping…',
+		restarting: 'Restarting…'
+	};
 
 	const stateLabel: Record<string, string> = {
 		stopped: 'Stopped',
@@ -43,28 +84,28 @@
 	<header>
 		<h1>Axon Panel</h1>
 		<div class="header-actions">
-			<ThemeSwitcher />
+			<a class="icon-link" href="/settings" title="Settings" aria-label="Settings">
+				<svg
+					viewBox="0 0 24 24"
+					width="20"
+					height="20"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+				>
+					<circle cx="12" cy="12" r="3"></circle>
+					<path
+						d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"
+					></path>
+				</svg>
+			</a>
 			<form method="POST" action="?/logout" use:enhance>
 				<button type="submit" class="ghost">Log out</button>
 			</form>
 		</div>
 	</header>
-
-	<section class="enroll">
-		<form method="POST" action="?/generateEnrollmentToken" use:enhance>
-			<button type="submit">Generate enrollment token</button>
-		</form>
-		{#if form?.enrollmentToken}
-			<p class="token-display">
-				New token (valid 30 min, copy now): <code>{form.enrollmentToken}</code>
-			</p>
-			<p class="hint">
-				On the Pulse machine: <code
-					>pulse --server-url &lt;this Panel's URL&gt; --enroll-token {form.enrollmentToken}</code
-				>
-			</p>
-		{/if}
-	</section>
 
 	{#if data.agents.length === 0}
 		<p class="empty">No Pulse agents enrolled yet.</p>
@@ -74,7 +115,13 @@
 		<section class="agent-card">
 			<div class="agent-header">
 				<div>
-					<h2>{agent.hostname}</h2>
+					<h2>
+						<span
+							class="status-dot {isOnline(agent) ? 'status-dot-online' : 'status-dot-offline'}"
+							title={isOnline(agent) ? 'Online' : 'Offline'}
+						></span>
+						{agent.hostname}
+					</h2>
 					<p class="meta">{agent.os}/{agent.arch} · Pulse v{agent.pulseVersion} · last seen {lastSeenLabel(agent.lastSeenAt)}</p>
 				</div>
 				<div class="host-metrics">
@@ -91,21 +138,58 @@
 						<li>
 							<div class="instance-name">
 								<strong>{instance.name}</strong>
-								<span class="badge {stateClass[instance.runningState] ?? 'badge-info'}">
-									{stateLabel[instance.runningState] ?? instance.runningState}
-								</span>
+								{#if data.instancesBackingUp[instance.id]}
+									<span
+										class="badge badge-warning badge-pulsing"
+										title="A backup/restore's stop→archive→restart cycle happens between heartbeats, so running_state can't be trusted until it's done"
+									>
+										{backupBadgeLabel[data.instancesBackingUp[instance.id]]}
+									</span>
+								{:else if data.pendingActions[instance.id]}
+									<span
+										class="badge badge-warning badge-pulsing"
+										title="Command sent to Pulse; running_state often jumps straight to the new state without ever showing this in between"
+									>
+										{pendingActionLabel[data.pendingActions[instance.id]]}
+									</span>
+								{:else}
+									<span
+										class="badge {stateClass[instance.runningState] ?? 'badge-info'} {instance.runningState ===
+											'starting' || instance.runningState === 'stopping'
+											? 'badge-pulsing'
+											: ''}"
+									>
+										{stateLabel[instance.runningState] ?? instance.runningState}
+									</span>
+								{/if}
 							</div>
 							<span class="meta">{instance.gamePlatform} · {instance.softwareType} {instance.version}</span>
+							{#if isBusy(instance) && agent.lastSeenAt}
+								<div class="heartbeat-bar" title={nextHeartbeatLabel(agent, now)}>
+									<div
+										class="heartbeat-bar-fill"
+										class:heartbeat-bar-overdue={heartbeatProgress(agent, now) >= 1}
+										style="width: {heartbeatProgress(agent, now) * 100}%"
+									></div>
+								</div>
+								<p class="meta">{nextHeartbeatLabel(agent, now)}</p>
+							{/if}
 							<div class="instance-actions">
 								<form method="POST" action="?/queueCommand" use:enhance>
 									<input type="hidden" name="pulse_agent_id" value={agent.id} />
 									<input type="hidden" name="instance_id" value={instance.instanceId} />
-									<input type="hidden" name="type" value="start_instance" />
+									<input
+										type="hidden"
+										name="type"
+										value={instance.runningState === 'running' ? 'restart_instance' : 'start_instance'}
+									/>
 									<button
 										type="submit"
-										disabled={instance.runningState === 'running' || instance.runningState === 'starting'}
+										disabled={isBusy(instance) ||
+											instance.runningState === 'starting' ||
+											instance.runningState === 'stopping'}
 									>
-										Start
+										{instance.runningState === 'running' ? 'Restart' : 'Start'}
 									</button>
 								</form>
 								<form method="POST" action="?/queueCommand" use:enhance>
@@ -115,12 +199,15 @@
 									<button
 										type="submit"
 										class="ghost"
-										disabled={instance.runningState === 'stopped' || instance.runningState === 'stopping'}
+										disabled={isBusy(instance) ||
+											instance.runningState === 'stopped' ||
+											instance.runningState === 'stopping'}
 									>
 										Stop
 									</button>
 								</form>
 							</div>
+							<a class="ghost-link backups-link" href="/instances/{instance.id}">Backups →</a>
 						</li>
 					{/each}
 				</ul>
@@ -150,23 +237,6 @@
 		display: flex;
 		align-items: center;
 		gap: 1rem;
-	}
-
-	.enroll {
-		background: var(--axon-surface);
-		border: 1px solid var(--axon-accent);
-		border-radius: 0.75rem;
-		padding: 1rem 1.25rem;
-		margin-bottom: 1.5rem;
-	}
-
-	.token-display {
-		margin-top: 0.75rem;
-	}
-
-	.hint {
-		font-size: 0.8rem;
-		opacity: 0.75;
 	}
 
 	.agent-card {
@@ -249,6 +319,49 @@
 		background: var(--axon-status-info);
 	}
 
+	.badge-pulsing {
+		animation: badge-pulse 1.4s ease-in-out infinite;
+	}
+
+	@keyframes badge-pulse {
+		0%,
+		100% {
+			opacity: 1;
+		}
+		50% {
+			opacity: 0.45;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.badge-pulsing {
+			animation: none;
+		}
+	}
+
+	.agent-header h2 {
+		display: flex;
+		align-items: center;
+		margin: 0;
+	}
+
+	.status-dot {
+		display: inline-block;
+		width: 0.55rem;
+		height: 0.55rem;
+		border-radius: 50%;
+		margin-right: 0.5rem;
+		flex-shrink: 0;
+	}
+
+	.status-dot-online {
+		background: var(--axon-status-success);
+	}
+
+	.status-dot-offline {
+		background: var(--axon-status-error);
+	}
+
 	.empty {
 		opacity: 0.7;
 	}
@@ -272,5 +385,52 @@
 		background: transparent;
 		border: 1px solid var(--axon-accent);
 		color: var(--axon-text);
+	}
+
+	.ghost-link {
+		padding: 0.4rem 0.9rem;
+		border-radius: 0.375rem;
+		border: 1px solid var(--axon-accent);
+		color: var(--axon-text);
+		text-decoration: none;
+		font-size: 0.875rem;
+		display: inline-flex;
+		align-items: center;
+	}
+
+	.icon-link {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 2.1rem;
+		height: 2.1rem;
+		border-radius: 0.375rem;
+		border: 1px solid var(--axon-accent);
+		color: var(--axon-text);
+	}
+
+	.backups-link {
+		align-self: flex-start;
+		margin-top: 0.25rem;
+	}
+
+	.heartbeat-bar {
+		width: min(220px, 100%);
+		height: 0.3rem;
+		border-radius: 999px;
+		background: var(--axon-accent);
+		margin-top: 0.4rem;
+		overflow: hidden;
+	}
+
+	.heartbeat-bar-fill {
+		height: 100%;
+		background: var(--axon-status-info);
+		border-radius: 999px;
+		transition: width 1s linear;
+	}
+
+	.heartbeat-bar-fill.heartbeat-bar-overdue {
+		background: var(--axon-status-warning);
 	}
 </style>
