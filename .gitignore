@@ -21,6 +21,8 @@ wrangler.toml
 !wrangler.toml.example
 *.sqlite
 *.sqlite-*
+*.db
+*.db-*
 credential.json
 update-state.json
 
