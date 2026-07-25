@@ -1,17 +1,12 @@
 import { json, error } from '@sveltejs/kit';
 import { and, eq } from 'drizzle-orm';
 import type { RequestHandler } from './$types';
-import { backupDownloads, backups, commands, pulseAgents, serverInstances } from '$lib/server/db/schema';
+import { commands, pulseAgents, serverInstances } from '$lib/server/db/schema';
+import { failStaleCommands, resolveCommandOutcome } from '$lib/server/commands';
 import { pruneExpiredDownloads } from '$lib/server/backupDownloads';
 import { bearerToken } from '$lib/server/http';
 import { sha256Hex } from '$lib/server/tokens';
-import type {
-	BackupCommandPayload,
-	HeartbeatRequestBody,
-	HeartbeatResponseBody,
-	RestoreCommandPayload,
-	WireCommand
-} from '$lib/server/protocol';
+import type { HeartbeatRequestBody, HeartbeatResponseBody, WireCommand } from '$lib/server/protocol';
 
 export const POST: RequestHandler = async ({ request, locals }) => {
 	const token = bearerToken(request);
@@ -62,92 +57,27 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 
 	for (const result of body.pending_command_results ?? []) {
 		const [cmd] = await locals.db.select().from(commands).where(eq(commands.id, result.command_id));
+		// Unknown id, or already resolved (e.g. by the stale-command sweep
+		// below on a previous heartbeat) — a late genuine result must never
+		// overwrite an already-terminal row.
+		if (!cmd || cmd.status !== 'sent') continue;
 
-		await locals.db
-			.update(commands)
-			.set({
-				status: result.success ? 'completed' : 'failed',
-				resultMessage: result.message,
-				completedAt: now
-			})
-			.where(eq(commands.id, result.command_id));
-
-		if (!cmd) continue;
-
-		if (cmd.type === 'backup_instance' || cmd.type === 'delete_backup') {
-			const payload = cmd.payload ? (JSON.parse(cmd.payload) as BackupCommandPayload) : null;
-			if (!payload?.backup_id) continue;
-
-			if (cmd.type === 'backup_instance') {
-				await locals.db
-					.update(backups)
-					.set({
-						status: result.success ? 'complete' : 'failed',
-						sizeBytes: result.size_bytes,
-						checksumSha256: result.checksum,
-						errorMessage: result.success ? null : result.message,
-						completedAt: now
-					})
-					.where(eq(backups.id, payload.backup_id));
-			} else if (result.success) {
-				await locals.db.delete(backups).where(eq(backups.id, payload.backup_id));
-			} else {
-				await locals.db
-					.update(backups)
-					.set({ pendingOperation: null, errorMessage: result.message })
-					.where(eq(backups.id, payload.backup_id));
-			}
-		} else if (cmd.type === 'restore_backup') {
-			const restorePayload = cmd.payload ? (JSON.parse(cmd.payload) as RestoreCommandPayload) : null;
-			if (!restorePayload?.backup_id || !restorePayload?.safety_backup_id) continue;
-
-			// Pulse reports the safety backup's size/checksum whenever that
-			// step itself succeeded, independent of whether the restore that
-			// followed it succeeded — so a real, usable safety backup gets
-			// recorded even if the extract step afterward failed.
-			if (result.size_bytes && result.checksum) {
-				await locals.db
-					.update(backups)
-					.set({
-						status: 'complete',
-						sizeBytes: result.size_bytes,
-						checksumSha256: result.checksum,
-						completedAt: now
-					})
-					.where(eq(backups.id, restorePayload.safety_backup_id));
-			} else {
-				await locals.db
-					.update(backups)
-					.set({ status: 'failed', errorMessage: result.message, completedAt: now })
-					.where(eq(backups.id, restorePayload.safety_backup_id));
-			}
-
-			await locals.db
-				.update(backups)
-				.set({ pendingOperation: null })
-				.where(eq(backups.id, restorePayload.backup_id));
-		} else if (cmd.type === 'push_backup' && !result.success) {
-			// On success there's nothing to do here — the upload endpoint
-			// itself already marked backupDownloads 'ready' by the time
-			// Pulse can report this command as completed (it only returns
-			// success after the upload HTTP call itself succeeds). On
-			// failure, mark it so a "Preparing download…" row doesn't hang
-			// forever waiting for a file that's never coming.
-			const pushPayload = cmd.payload ? (JSON.parse(cmd.payload) as BackupCommandPayload) : null;
-			if (pushPayload?.backup_id) {
-				await locals.db
-					.update(backupDownloads)
-					.set({ status: 'failed', errorMessage: result.message })
-					.where(eq(backupDownloads.backupId, pushPayload.backup_id));
-			}
-		}
+		await resolveCommandOutcome(
+			locals.db,
+			cmd,
+			{ success: result.success, message: result.message, sizeBytes: result.size_bytes, checksum: result.checksum },
+			now
+		);
 	}
 
-	// Opportunistic cleanup for abandoned download holds (admin requested a
-	// download, then never clicked it, or it never became ready) — piggybacks
-	// on this agent's regular heartbeat cadence rather than a real timer,
-	// consistent with the project's request-driven design.
+	// Opportunistic cleanup, both piggybacked on this agent's regular
+	// heartbeat cadence rather than a real timer, consistent with the
+	// project's request-driven design: abandoned download holds (admin
+	// requested a download, then never clicked it, or it never became
+	// ready), and commands stuck 'sent' because Pulse died/restarted before
+	// reporting a result (see CLAUDE.md's former "Known gaps" entry on this).
 	await pruneExpiredDownloads(locals.db, agent.id);
+	await failStaleCommands(locals.db, agent.id);
 
 	const queued = await locals.db
 		.select()

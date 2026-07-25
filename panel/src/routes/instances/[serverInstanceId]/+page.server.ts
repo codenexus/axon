@@ -3,7 +3,7 @@ import { and, desc, eq, inArray } from 'drizzle-orm';
 import type { Actions, PageServerLoad } from './$types';
 import { backupDownloads, backups, pulseAgents, serverInstances } from '$lib/server/db/schema';
 import { DOWNLOAD_REQUEST_TTL_MS, pruneExpiredDownloads } from '$lib/server/backupDownloads';
-import { newBackupId, queueCommand } from '$lib/server/commands';
+import { failStaleCommands, newBackupId, queueCommand } from '$lib/server/commands';
 
 export const load: PageServerLoad = async ({ params, locals }) => {
 	const [instance] = await locals.db
@@ -13,6 +13,7 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 	if (!instance) throw error(404, 'instance not found');
 
 	await pruneExpiredDownloads(locals.db, instance.pulseAgentId);
+	await failStaleCommands(locals.db, instance.pulseAgentId);
 
 	const instanceBackups = await locals.db
 		.select()

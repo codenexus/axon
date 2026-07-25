@@ -3,11 +3,19 @@ import { and, eq, inArray } from 'drizzle-orm';
 import type { Actions, PageServerLoad } from './$types';
 import { backups, commands, pulseAgents, serverInstances } from '$lib/server/db/schema';
 import { destroySession } from '$lib/server/auth';
-import { queueCommand } from '$lib/server/commands';
+import { failStaleCommands, queueCommand } from '$lib/server/commands';
 
 export const load: PageServerLoad = async ({ locals }) => {
 	const agents = await locals.db.select().from(pulseAgents);
 	const instances = await locals.db.select().from(serverInstances);
+
+	// Unscoped (no agent filter) — this is the one place that also has to
+	// catch commands whose owning agent never heartbeats again, so a stuck
+	// "Starting…/Backing up…" badge doesn't hang forever waiting on an agent
+	// that isn't coming back. Run before both derived queries below so it
+	// self-heals both instancesBackingUp and pendingActions in one pass.
+	await failStaleCommands(locals.db);
+
 	// A backup's (or a restore's pre-restore backup step's) stop->archive
 	// cycle happens entirely between two heartbeats — Pulse's own
 	// running_state reporting never has a chance to show "stopping" for it

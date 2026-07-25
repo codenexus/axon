@@ -127,10 +127,20 @@ and `panel/src/lib/server/protocol.ts` (TypeScript).
   gap to "fix". **This has a real consequence to design around**: if Pulse
   itself restarts (e.g. mid-deploy) between finishing a command and the
   heartbeat that would report it, the result is lost and the command sits
-  at `sent` forever with no timeout. This happened during development
-  (a `delete_backup` got orphaned this way) and was fixed by hand
-  (correcting the DB to match verified on-disk reality); there's no
-  automatic recovery for it yet — see "Known gaps" below.
+  at `sent` forever with no result. This happened during development
+  (a `delete_backup` got orphaned this way) and was first fixed by hand
+  (correcting the DB to match verified on-disk reality); it's now handled
+  automatically by `failStaleCommands()`
+  (`panel/src/lib/server/commands.ts`) — a command stuck `sent` past 3
+  missed heartbeats (reusing `isOnline()`'s "presumed offline" bar,
+  `panel/src/lib/heartbeat.ts`) auto-resolves to `failed` with an honest
+  "timed out waiting for a result" message, and any dependent `backups`/
+  `backupDownloads` row is resolved the same way a genuine failure would
+  resolve it (both paths now share `resolveCommandOutcome()`). Piggybacked
+  on requests, not a timer, per the same Cloudflare-compatibility
+  constraint as `pruneExpiredDownloads()` — called from the heartbeat route
+  (agent-scoped), the dashboard load (unscoped, since the owning agent may
+  never come back), and the instance detail page load (agent-scoped).
 - **Enrollment** (`POST /api/v1/enroll`, one-time): token → device
   credential. Enrollment tokens and device credentials are never stored
   raw, only `sha256Hex()` hashes (`panel/src/lib/server/tokens.ts` /
@@ -510,13 +520,6 @@ dashboard header (see STYLE.md).
 
 ## Known gaps (real, not yet fixed — don't assume otherwise)
 
-- **No timeout on `sent` commands.** If Pulse dies between finishing a
-  command and the heartbeat that would report it, that command (and any
-  DB row gated on it, e.g. a `backupDownloads` row) is orphaned forever
-  with no automatic recovery. Happened once for real during this
-  feature's development; fixed by hand. A lightweight fix (auto-fail a
-  command `sent` for longer than a few heartbeat intervals) was proposed
-  but not built.
 - **Scheduling/retention (backups Phase 4) is not built.** No
   `backupSchedules` table, no due-check, no automatic pruning, no "Apply
   Retention Now" button. The mockup reference (see below) and this file's
@@ -552,10 +555,10 @@ Deliberately deferred — don't assume half-built unless you find code for it:
 - A raw RCON console UI (arbitrary command input) plus dedicated
   whitelist/op/ban forms, file management (plugins/mods browsing,
   uploads), multi-user auth/RBAC, mDNS/Bonjour discovery, Java-prerequisite
-  install flow, Tauri sidecar process spawning, self-update, a stale-command
-  timeout (see "Known gaps"), and a "Systems"-style multi-node overview
-  page (the current dashboard already lists multiple agents, but nothing
-  like the old mockup's dedicated node-detail/diagnostic-command view
+  install flow, Tauri sidecar process spawning, self-update, and a
+  "Systems"-style multi-node overview page (the current dashboard already
+  lists multiple agents, but nothing like the old mockup's dedicated
+  node-detail/diagnostic-command view
   exists).
 
 See `PROJECT_LOG.md` for session-by-session history and next steps, and
