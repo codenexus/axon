@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import { invalidateAll } from '$app/navigation';
+	import type { ActionResult } from '@sveltejs/kit';
 	import { heartbeatProgress, nextHeartbeatLabel } from '$lib/heartbeat';
 	import ConfirmModal from '$lib/components/ConfirmModal.svelte';
 	import type { ActionData, PageData } from './$types';
@@ -29,13 +30,25 @@
 		return backup.trigger === 'pre_restore' && backup.status === 'pending';
 	}
 
+	// A console command sent now only reaches Pulse on its next heartbeat,
+	// and the response comes back on the heartbeat after that — polling
+	// faster here doesn't beat that floor, but it does shave the perceived
+	// wait down to noticing the result sooner once Pulse has actually
+	// reported it.
+	const consoleInFlight = $derived(
+		data.consoleHistory.some((c) => c.status === 'queued' || c.status === 'sent')
+	);
+
 	// Poll unconditionally while this page is open, rather than only while
 	// this page's own data already shows something in flight — that
 	// reactive-only approach misses a backup queued from elsewhere (another
 	// tab, the API directly) while this tab sat idle, since nothing would
-	// tell an idle tab to start checking.
+	// tell an idle tab to start checking. Re-runs (tearing down and
+	// restarting the interval at the new cadence) whenever consoleInFlight
+	// changes, since $effect re-executes when its reactive dependencies do.
 	$effect(() => {
-		const interval = setInterval(() => invalidateAll(), 3000);
+		const ms = consoleInFlight ? 1000 : 3000;
+		const interval = setInterval(() => invalidateAll(), ms);
 		return () => clearInterval(interval);
 	});
 
@@ -107,6 +120,26 @@
 		if (d.status === 'ready') return 'ready';
 		return 'none'; // expired/failed — treat like never requested, admin can just click again
 	}
+
+	function consoleCommandText(entry: (typeof data.consoleHistory)[number]): string {
+		if (!entry.payload) return '';
+		try {
+			return (JSON.parse(entry.payload) as { command?: string }).command ?? '';
+		} catch {
+			return '';
+		}
+	}
+
+	// Clears the command input after a successful send, rather than leaving
+	// the just-sent text sitting there — the transcript below is the record
+	// of what was sent, the input is just for composing the next one.
+	let consoleForm: HTMLFormElement;
+	function handleConsoleSubmit() {
+		return async ({ result, update }: { result: ActionResult; update: () => Promise<void> }) => {
+			await update();
+			if (result.type === 'success') consoleForm?.reset();
+		};
+	}
 </script>
 
 <svelte:head>
@@ -121,6 +154,58 @@
 			<p class="meta">{data.instance.gamePlatform} · {data.instance.softwareType} {data.instance.version}</p>
 		</div>
 	</header>
+
+	<section class="card">
+		<div class="section-header">
+			<h2>Console</h2>
+		</div>
+
+		<form
+			method="POST"
+			action="?/runConsoleCommand"
+			use:enhance={handleConsoleSubmit}
+			bind:this={consoleForm}
+			class="console-form"
+		>
+			<input
+				type="text"
+				name="command"
+				placeholder="say hello"
+				autocomplete="off"
+				disabled={data.instance.runningState !== 'running'}
+				required
+			/>
+			<button type="submit" disabled={data.instance.runningState !== 'running'}>Send</button>
+		</form>
+		{#if data.instance.runningState !== 'running'}
+			<p class="meta">The instance must be running to send RCON commands.</p>
+		{/if}
+		{#if form?.error}
+			<p class="error">{form.error}</p>
+		{/if}
+
+		{#if data.consoleHistory.length > 0}
+			<ul class="console-log">
+				{#each data.consoleHistory as entry (entry.id)}
+					<li>
+						<div class="console-entry-header">
+							<code>&gt; {consoleCommandText(entry)}</code>
+							{#if entry.status === 'queued' || entry.status === 'sent'}
+								<span class="badge badge-warning badge-pulsing">Sent, waiting…</span>
+							{:else if entry.status === 'failed'}
+								<span class="badge badge-error">Failed</span>
+							{/if}
+						</div>
+						{#if entry.status === 'completed'}
+							<pre class="console-output">{entry.output || '(no output)'}</pre>
+						{:else if entry.status === 'failed'}
+							<p class="error">{entry.resultMessage}</p>
+						{/if}
+					</li>
+				{/each}
+			</ul>
+		{/if}
+	</section>
 
 	<section class="card">
 		<div class="section-header">
@@ -349,6 +434,61 @@
 
 	.section-header h2 {
 		margin: 0;
+	}
+
+	.console-form {
+		display: flex;
+		gap: 0.5rem;
+		margin-bottom: 0.75rem;
+	}
+
+	.console-form input {
+		flex: 1;
+		padding: 0.5rem 0.625rem;
+		border-radius: 0.375rem;
+		border: 1px solid var(--axon-accent);
+		background: var(--axon-background);
+		color: var(--axon-text);
+		font-family: monospace;
+	}
+
+	.console-log {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		max-height: 20rem;
+		overflow-y: auto;
+	}
+
+	.console-log li {
+		border-top: 1px solid var(--axon-accent);
+		padding-top: 0.5rem;
+	}
+
+	.console-entry-header {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+	}
+
+	.console-entry-header code {
+		font-family: monospace;
+		font-size: 0.85rem;
+	}
+
+	.console-output {
+		font-family: monospace;
+		font-size: 0.8rem;
+		white-space: pre-wrap;
+		word-break: break-word;
+		background: var(--axon-background);
+		border-radius: 0.375rem;
+		padding: 0.5rem 0.625rem;
+		margin: 0.4rem 0 0;
 	}
 
 	.schedule-form {

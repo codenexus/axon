@@ -184,6 +184,9 @@ func execute(client *protocol.Client, cred *credential.Credential, manager *mcse
 	case "restore_backup":
 		return executeRestore(manager, backupEngine, cmd)
 
+	case "console_command":
+		return executeConsoleCommand(manager, cmd)
+
 	default:
 		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "unknown command type: " + cmd.Type}
 	}
@@ -351,4 +354,23 @@ func executeRestore(manager *mcserver.Manager, backupEngine *backup.Engine, cmd 
 
 	result.Success = true
 	return result
+}
+
+// executeConsoleCommand sends an arbitrary admin command to the instance's
+// RCON port. A normal synchronous command like every other type here —
+// RCON's dial+auth+execute is bounded at a few seconds, unlike
+// create_instance's multi-minute provisioning, so this doesn't need the
+// async job pattern in create_instance.go.
+func executeConsoleCommand(manager *mcserver.Manager, cmd protocol.Command) protocol.CommandResult {
+	var payload protocol.ConsoleCommandPayload
+	if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "invalid payload: " + err.Error()}
+	}
+
+	output, err := manager.RunConsoleCommand(cmd.InstanceID, payload.Command)
+	if err != nil {
+		log.Printf("command %s (%s) failed: %v", cmd.ID, cmd.Type, err)
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: err.Error()}
+	}
+	return protocol.CommandResult{CommandID: cmd.ID, Success: true, Output: output}
 }

@@ -70,7 +70,7 @@ export const commands = sqliteTable('commands', {
 	id: text('id').primaryKey(),
 	pulseAgentId: text('pulse_agent_id').notNull(),
 	instanceId: text('instance_id').notNull(),
-	// "start_instance" | "stop_instance" | "restart_instance" | "backup_instance" | "restore_backup" | "delete_backup" | "push_backup" | "create_instance"
+	// "start_instance" | "stop_instance" | "restart_instance" | "backup_instance" | "restore_backup" | "delete_backup" | "push_backup" | "create_instance" | "console_command"
 	type: text('type').notNull(),
 	// JSON-stringified command-specific payload (e.g. BackupCommandPayload); null for start/stop.
 	payload: text('payload'),
@@ -84,7 +84,11 @@ export const commands = sqliteTable('commands', {
 	// "installing_java" | "downloading" | "configuring" | "registering".
 	// Null once terminal (completed/failed) or for command types that
 	// never report progress.
-	progressPhase: text('progress_phase')
+	progressPhase: text('progress_phase'),
+	// The RCON response text for a console_command result — populated
+	// whenever the RCON round-trip itself succeeded, even if the game
+	// rejected the command. Null for every other command type.
+	output: text('output')
 });
 
 export const backups = sqliteTable('backups', {

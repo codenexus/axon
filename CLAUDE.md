@@ -446,6 +446,52 @@ could otherwise allocate the same port before the first one's instance
 ever showed up in `server_instances`. See "Known gaps" for the allocator's
 one real limitation (blind to legacy hand-configured instances).
 
+### Raw RCON console
+
+`console_command`: an arbitrary admin command sent verbatim to a running
+instance's RCON port (`Manager.RunConsoleCommand`,
+`pulse/internal/mcserver/rcon_command.go`) and its text response returned
+to Panel. This is a normal synchronous command like every other type
+except `create_instance` — RCON's dial+auth+execute is bounded at a few
+seconds, so it runs inside `execute()`'s switch
+(`executeConsoleCommand` in `main.go`) like `start_instance`/
+`backup_instance`/etc., not the async/goroutine pattern
+`create_instance` needed for its multi-minute provisioning.
+
+**`Success` vs `Output` is a deliberate split, not two names for the same
+thing**: `Success` reflects whether the RCON exchange itself worked
+(reachable, authenticated) — `false` only for "not running," "RCON not
+configured," or a connection/auth failure. `Output` carries whatever text
+came back whenever the exchange succeeded, *even if the game itself
+rejected the command* (e.g. `/foo` → `"Unknown command"` is still a
+successful RCON round-trip, not a Pulse-side failure) — `Message` stays
+reserved for "the round-trip itself failed," matching how every other
+command type already uses `Message`.
+
+**No fallback path, unlike graceful stop.** `gracefulStop()` falls back to
+a bare OS signal when RCON isn't usable, because "stop the process" has a
+meaningful non-RCON way to happen. An arbitrary console command doesn't —
+if RCON isn't enabled/configured/reachable, `RunConsoleCommand` fails
+cleanly with a specific reason (not running / not configured / connect
+failed / auth failed) rather than attempting anything else.
+
+**Latency UX, resolved**: unlike a real terminal, a command sent now only
+reaches Pulse on its next heartbeat, and the response comes back on the
+heartbeat after that — up to ~2× `--interval` end-to-end in the worst
+case, an open question flagged since an earlier session. Resolved as: the
+instance page's transcript (`panel/src/routes/instances/[serverInstanceId]/+page.svelte`,
+reusing the `commands` table directly — no new table, `type='console_command'`
+rows *are* the transcript) polls at the page's normal 3s baseline, but
+drops to 1s specifically while the newest console command is
+`queued`/`sent` (a `$effect` depending on a derived `consoleInFlight`
+boolean naturally tears down and restarts the poll interval at the new
+cadence when it changes) — polling faster doesn't beat Pulse's
+`--interval` floor, but it does shave the perceived wait down to noticing
+the result sooner once Pulse has actually reported it. The transcript
+itself reuses the exact "Sent, waiting…" `badge-pulsing` precedent already
+established for backups/start/stop, rather than pretending to be a live
+console.
+
 ### Deploying Pulse to a real host — currently fully manual
 
 There's no CI/CD or auto-update pipeline yet. The established flow for this
@@ -533,13 +579,13 @@ connection yet. Bit twice during this feature's development.
    `pulse/cmd/pulse/main.go` (`executeBackup`, `executeRestore`,
    `executePushBackup` — these own the stop/restart orchestration around
    the mechanics).
-3. **Console commands (RCON)** — a raw admin console (arbitrary command
-   input, not just graceful stop) is not implemented yet. The RCON client
-   itself exists (`pulse/internal/rcon/`) and connects to the running
-   server's RCON port rather than piping stdin, so it works uniformly
-   across Vanilla/Paper/Forge/Fabric; only graceful stop uses it so far.
+3. **Console commands (RCON)** — implemented: `console_command`, an
+   arbitrary admin command sent verbatim to the instance's RCON port. See
+   "Raw RCON console" below.
 4. **In-game/gameplay commands** — no separate code path; anything typeable
-   with `/` in-game rides the same RCON layer once that exists.
+   with `/` in-game rides the same RCON layer `console_command` uses —
+   there's nothing gameplay-specific about it, it's just text sent
+   verbatim.
 5. **Provisioning** — `create_instance`, layered *before* process-level
    (there's no process to manage until this completes). See "Provisioning
    new servers" above. The one command type that doesn't complete
@@ -713,33 +759,36 @@ a real production Bedrock server ("nimo", home LAN, Tailscale-reachable):
 - **Pulse**: enrollment, heartbeat (now reporting its own `--interval`),
   start/stop/restart of configured Minecraft processes, RCON graceful stop,
   PID-file process reconciliation across Pulse's own restarts, full backup
-  lifecycle (create/list/delete/download/restore) per "Backups" above, and
+  lifecycle (create/list/delete/download/restore) per "Backups" above,
   provisioning brand-new Java/Bedrock vanilla servers (Java-runtime
   auto-install on Linux, download+configure, dynamic instance registration)
-  per "Provisioning new servers" below. `go build/vet/test` clean,
-  including Windows/macOS cross-compiles.
+  per "Provisioning new servers" above, and a raw RCON console
+  (`console_command`) per "Raw RCON console" above. `go build/vet/test`
+  clean, including Windows/macOS cross-compiles.
 - **Panel**: single-admin auth, enrollment token generation (now on
   `/settings`), dashboard listing agents/instances with online/offline
   status + accurate in-flight badges, start/stop/restart controls, a
   per-instance backups page (`/instances/[serverInstanceId]`) with
   create/list/delete/download/restore, backup scheduling + retention
   (interval-based automatic backups, keep-count/keep-days pruning, "Apply
-  Retention Now"), a themed confirm modal, 3 working theme palettes, an
-  agent detail page (`/agents/[pulseAgentId]`, the first agent-facing view
-  beyond the dashboard) with port-range/instances-dir config and a
-  create-server flow. `svelte-check` clean; both `ADAPTER=node` and
-  `ADAPTER=cloudflare` builds pass.
+  Retention Now"), a raw RCON console transcript on that same page, a
+  themed confirm modal, 3 working theme palettes, an agent detail page
+  (`/agents/[pulseAgentId]`, the first agent-facing view beyond the
+  dashboard) with port-range/instances-dir config and a create-server
+  flow. `svelte-check` clean; both `ADAPTER=node` and `ADAPTER=cloudflare`
+  builds pass.
 - Repo pushed to `codenexus/axon` (private), `main` branch.
 
 Deliberately deferred — don't assume half-built unless you find code for it:
 
-- A raw RCON console UI (arbitrary command input) plus dedicated
-  whitelist/op/ban forms, file management (plugins/mods browsing,
-  uploads), multi-user auth/RBAC, mDNS/Bonjour discovery, Tauri sidecar
-  process spawning, self-update, and a "Systems"-style multi-node overview
-  page (the current dashboard already lists multiple agents, but nothing
-  like the old mockup's dedicated node-detail/diagnostic-command view
-  exists).
+- Dedicated whitelist/op/ban forms (structured UI around specific RCON
+  commands — the raw console can already run `/whitelist add`, `/op`,
+  `/ban` etc. verbatim, this would be purpose-built forms around them),
+  file management (plugins/mods browsing, uploads), multi-user auth/RBAC,
+  mDNS/Bonjour discovery, Tauri sidecar process spawning, self-update, and
+  a "Systems"-style multi-node overview page (the current dashboard
+  already lists multiple agents, but nothing like the old mockup's
+  dedicated node-detail/diagnostic-command view exists).
 - Reusable server "definitions"/templates (the old UI mockup's "Create
   Definition" concept) — server creation is direct one-shot "create this
   specific server now," not a saved-template system. Deleting a

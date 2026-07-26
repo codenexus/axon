@@ -13,7 +13,8 @@ export type CommandType =
 	| 'restore_backup'
 	| 'delete_backup'
 	| 'push_backup'
-	| 'create_instance';
+	| 'create_instance'
+	| 'console_command';
 
 export async function queueCommand(
 	db: Db,
@@ -47,6 +48,8 @@ export interface CommandOutcome {
 	message?: string;
 	sizeBytes?: number;
 	checksum?: string;
+	// RCON response text for a console_command result.
+	output?: string;
 }
 
 /**
@@ -68,7 +71,8 @@ export async function resolveCommandOutcome(
 			status: outcome.success ? 'completed' : 'failed',
 			resultMessage: outcome.message,
 			completedAt: now,
-			progressPhase: null
+			progressPhase: null,
+			output: outcome.output ?? null
 		})
 		.where(eq(commands.id, cmd.id));
 

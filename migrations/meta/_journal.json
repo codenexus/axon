@@ -43,6 +43,13 @@
       "when": 1785028661770,
       "tag": "0005_motionless_lorna_dane",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1785030449010,
+      "tag": "0006_majestic_power_pack",
+      "breakpoints": true
     }
   ]
 }

@@ -55,6 +55,11 @@ export interface CommandResult {
 	// Set on a successful backup_instance result.
 	size_bytes?: number;
 	checksum?: string; // sha256 hex
+	// The RCON response text for a console_command result — populated
+	// whenever the RCON round-trip itself succeeded, even if the game
+	// rejected the command. message stays reserved for "the RCON exchange
+	// itself failed."
+	output?: string;
 }
 
 // Payload shape for backup_instance / delete_backup / push_backup commands.
@@ -91,6 +96,12 @@ export interface CreateInstanceCommandPayload {
 export interface CommandProgress {
 	command_id: string;
 	phase: string;
+}
+
+// Payload shape for console_command — an arbitrary admin command sent
+// verbatim to the instance's RCON port.
+export interface ConsoleCommandPayload {
+	command: string;
 }
 
 export interface HeartbeatRequestBody {

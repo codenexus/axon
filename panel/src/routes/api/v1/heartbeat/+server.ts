@@ -67,7 +67,13 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 		await resolveCommandOutcome(
 			locals.db,
 			cmd,
-			{ success: result.success, message: result.message, sizeBytes: result.size_bytes, checksum: result.checksum },
+			{
+				success: result.success,
+				message: result.message,
+				sizeBytes: result.size_bytes,
+				checksum: result.checksum,
+				output: result.output
+			},
 			now
 		);
 	}

@@ -104,11 +104,17 @@ type CommandResult struct {
 	// SizeBytes and Checksum are set on a successful backup_instance result.
 	SizeBytes int64  `json:"size_bytes,omitempty"`
 	Checksum  string `json:"checksum,omitempty"` // sha256 hex
+	// Output is the RCON response text for a console_command result —
+	// populated whenever the RCON round-trip itself succeeded, even if the
+	// game rejected the command (e.g. "Unknown command" is still a
+	// successful exchange). Message stays reserved for "the RCON exchange
+	// itself failed" (not running, not configured, unreachable, bad auth).
+	Output string `json:"output,omitempty"`
 }
 
 type Command struct {
 	ID   string `json:"id"`
-	Type string `json:"type"` // "start_instance" | "stop_instance" | "restart_instance" | "backup_instance" | "restore_backup" | "delete_backup" | "push_backup" | "create_instance"
+	Type string `json:"type"` // "start_instance" | "stop_instance" | "restart_instance" | "backup_instance" | "restore_backup" | "delete_backup" | "push_backup" | "create_instance" | "console_command"
 	// InstanceID is the id of an existing instance the command targets, for
 	// every type except create_instance — there, Panel pregenerates the id
 	// of the instance being created (which doesn't exist yet), following
@@ -147,6 +153,12 @@ type CreateInstanceCommandPayload struct {
 	JavaMajorVersion int    `json:"java_major_version,omitempty"`
 	Port             int    `json:"port"`
 	WorkingDir       string `json:"working_dir"`
+}
+
+// ConsoleCommandPayload is the Payload shape for "console_command" — an
+// arbitrary admin command sent verbatim to the instance's RCON port.
+type ConsoleCommandPayload struct {
+	Command string `json:"command"`
 }
 
 type HeartbeatResponse struct {

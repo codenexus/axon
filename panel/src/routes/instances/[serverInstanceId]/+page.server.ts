@@ -1,7 +1,7 @@
 import { error, fail } from '@sveltejs/kit';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import type { Actions, PageServerLoad } from './$types';
-import { backupDownloads, backups, backupSchedules, pulseAgents, serverInstances } from '$lib/server/db/schema';
+import { backupDownloads, backups, backupSchedules, commands, pulseAgents, serverInstances } from '$lib/server/db/schema';
 import { DOWNLOAD_REQUEST_TTL_MS, pruneExpiredDownloads } from '$lib/server/backupDownloads';
 import { applyRetention } from '$lib/server/backupSchedules';
 import { failStaleCommands, newBackupId, queueCommand } from '$lib/server/commands';
@@ -49,12 +49,31 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 		.from(backupSchedules)
 		.where(eq(backupSchedules.serverInstanceId, params.serverInstanceId));
 
+	// Last 20, newest-last (chronological top-to-bottom like a real
+	// terminal scrollback) — unlike the backups list's newest-first
+	// convention, which reads better for independent items rather than an
+	// ongoing exchange.
+	const recentConsoleCommands = await locals.db
+		.select()
+		.from(commands)
+		.where(
+			and(
+				eq(commands.pulseAgentId, instance.pulseAgentId),
+				eq(commands.instanceId, instance.instanceId),
+				eq(commands.type, 'console_command')
+			)
+		)
+		.orderBy(desc(commands.createdAt))
+		.limit(20);
+	recentConsoleCommands.reverse();
+
 	return {
 		instance,
 		backups: instanceBackups,
 		downloadsByBackupId,
 		agentHeartbeat: agent ?? null,
-		schedule: schedule ?? null
+		schedule: schedule ?? null,
+		consoleHistory: recentConsoleCommands
 	};
 };
 
@@ -284,6 +303,27 @@ export const actions: Actions = {
 		}
 
 		await applyRetention(locals.db, schedule, Date.now());
+
+		return { ok: true };
+	},
+
+	runConsoleCommand: async ({ request, params, locals }) => {
+		const form = await request.formData();
+		const command = String(form.get('command') ?? '').trim();
+		if (!command) return fail(400, { error: 'enter a command' });
+
+		const [instance] = await locals.db
+			.select()
+			.from(serverInstances)
+			.where(eq(serverInstances.id, params.serverInstanceId));
+		if (!instance) return fail(404, { error: 'instance not found' });
+
+		await queueCommand(locals.db, {
+			pulseAgentId: instance.pulseAgentId,
+			instanceId: instance.instanceId,
+			type: 'console_command',
+			payload: { command }
+		});
 
 		return { ok: true };
 	}
