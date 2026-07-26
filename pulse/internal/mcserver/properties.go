@@ -60,3 +60,45 @@ func ReadRCONConfig(workingDir string) (cfg RCONConfig, ok bool) {
 	}
 	return RCONConfig{Port: port, Password: password}, true
 }
+
+// WriteProperty creates server.properties at path if it doesn't exist yet
+// (common right after provisioning — Java's server generates most of this
+// file itself on first boot, Bedrock's zip ships a default one), or patches
+// the single line for key if present, or appends a new key=value line if
+// the key isn't already there. Comment lines and unrelated keys are left
+// untouched.
+//
+// Exported so pulse/internal/provision can reuse it when configuring a
+// freshly-downloaded server, rather than duplicating this line-based
+// parse/rewrite logic.
+func WriteProperty(path, key, value string) error {
+	var lines []string
+	found := false
+
+	if data, err := os.ReadFile(path); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if !found && !strings.HasPrefix(trimmed, "#") {
+				if k, _, ok := strings.Cut(trimmed, "="); ok && strings.TrimSpace(k) == key {
+					line = key + "=" + value
+					found = true
+				}
+			}
+			lines = append(lines, line)
+		}
+		// Splitting a trailing-newline-terminated file leaves one empty
+		// trailing element; drop it so we don't accumulate a blank line on
+		// every rewrite.
+		if len(lines) > 0 && lines[len(lines)-1] == "" {
+			lines = lines[:len(lines)-1]
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	if !found {
+		lines = append(lines, key+"="+value)
+	}
+
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+}

@@ -14,6 +14,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"sort"
 	"sync"
 	"time"
 
@@ -28,6 +29,14 @@ type InstanceConfig struct {
 	SoftwareType string   `json:"software_type"` // "vanilla" for v1
 	Command      []string `json:"command"`
 	WorkingDir   string   `json:"working_dir"`
+	// Env holds extra "KEY=VALUE" entries appended to the spawned process's
+	// environment (on top of Pulse's own inherited environment) — e.g.
+	// bedrock_server needs LD_LIBRARY_PATH=. to find its bundled .so files.
+	// Empty/omitted for every hand-configured instance and for Java.
+	Env []string `json:"env,omitempty"`
+	// Port is only set for instances Pulse itself provisioned via
+	// create_instance — see protocol.InstanceStatus.Port's doc comment.
+	Port int `json:"port,omitempty"`
 }
 
 type fileConfig struct {
@@ -83,6 +92,39 @@ func NewManager(configs []InstanceConfig) *Manager {
 	return m
 }
 
+// AddInstance registers a newly-provisioned instance (see
+// pulse/internal/provision and pulse/cmd/pulse/create_instance.go) and
+// persists the full instance list to configPath in the same critical
+// section as the in-memory insert — so two create_instance commands landing
+// in the same heartbeat batch can't race writing the config file, and a
+// failed disk write can never leave memory and disk holding different
+// instance lists (the in-memory insert is rolled back if SaveConfig fails).
+// Rejects a duplicate ID (defensive — Panel-generated ids shouldn't collide
+// in practice).
+func (m *Manager) AddInstance(cfg InstanceConfig, configPath, backupsDir string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.instances[cfg.ID]; exists {
+		return fmt.Errorf("instance %q already exists", cfg.ID)
+	}
+	m.instances[cfg.ID] = &instance{cfg: cfg, state: protocol.StateStopped}
+
+	configs := make([]InstanceConfig, 0, len(m.instances))
+	for _, inst := range m.instances {
+		inst.mu.Lock()
+		configs = append(configs, inst.cfg)
+		inst.mu.Unlock()
+	}
+	sort.Slice(configs, func(i, j int) bool { return configs[i].ID < configs[j].ID })
+
+	if err := SaveConfig(configPath, configs, backupsDir); err != nil {
+		delete(m.instances, cfg.ID)
+		return fmt.Errorf("persist instance config: %w", err)
+	}
+	return nil
+}
+
 func (m *Manager) Start(id string) error {
 	m.mu.RLock()
 	inst, ok := m.instances[id]
@@ -114,6 +156,9 @@ func (m *Manager) Start(id string) error {
 	cmd.Dir = inst.cfg.WorkingDir
 	cmd.Stdout = bufio.NewWriter(logFile)
 	cmd.Stderr = cmd.Stdout
+	if len(inst.cfg.Env) > 0 {
+		cmd.Env = append(os.Environ(), inst.cfg.Env...)
+	}
 	setProcAttrs(cmd)
 
 	if err := cmd.Start(); err != nil {
@@ -340,6 +385,7 @@ func (m *Manager) Statuses() []protocol.InstanceStatus {
 			PlayerCount:   0,
 			Players:       []string{},
 			UptimeSeconds: uptime,
+			Port:          inst.cfg.Port,
 		})
 		inst.mu.Unlock()
 	}

@@ -127,6 +127,7 @@
 				<div class="host-metrics">
 					<span>CPU {agent.cpuUsagePercent?.toFixed(0) ?? '—'}%</span>
 					<span>RAM {formatBytes(agent.ramUsedBytes)} / {formatBytes(agent.ramTotalBytes)}</span>
+					<a class="ghost-link manage-link" href="/agents/{agent.id}">Manage →</a>
 				</div>
 			</div>
 
@@ -412,6 +413,12 @@
 	.backups-link {
 		align-self: flex-start;
 		margin-top: 0.25rem;
+	}
+
+	.manage-link {
+		margin-top: 0.5rem;
+		padding: 0.25rem 0.7rem;
+		font-size: 0.8rem;
 	}
 
 	.heartbeat-bar {

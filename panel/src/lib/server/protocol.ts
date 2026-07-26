@@ -43,6 +43,9 @@ export interface InstanceStatus {
 	players: string[] | null;
 	world_size_bytes: number;
 	uptime_seconds: number;
+	// Only populated for instances Pulse itself provisioned via
+	// create_instance — legacy hand-configured instances never report one.
+	port?: number;
 }
 
 export interface CommandResult {
@@ -67,6 +70,29 @@ export interface RestoreCommandPayload {
 	safety_backup_id: string;
 }
 
+// Payload shape for create_instance. Panel fully resolves the version/
+// download URL/required Java version before ever queuing this — Pulse
+// does zero version or software-catalog resolution itself.
+export interface CreateInstanceCommandPayload {
+	name: string;
+	game_platform: string;
+	version: string;
+	software_type: string;
+	download_url: string;
+	// Omitted for bedrock — no JVM involved.
+	java_major_version?: number;
+	port: number;
+	working_dir: string;
+}
+
+// Reports that a long-running command (currently only create_instance) is
+// still in flight and roughly what it's doing — distinct from
+// CommandResult, which is always terminal.
+export interface CommandProgress {
+	command_id: string;
+	phase: string;
+}
+
 export interface HeartbeatRequestBody {
 	device_id: string;
 	timestamp: number;
@@ -77,6 +103,7 @@ export interface HeartbeatRequestBody {
 	// countdown instead of guessing a fixed default.
 	interval_seconds: number;
 	pending_command_results?: CommandResult[] | null;
+	in_progress_commands?: CommandProgress[] | null;
 }
 
 export interface WireCommand {

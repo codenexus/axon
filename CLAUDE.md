@@ -333,6 +333,119 @@ select so anything it queues ships in that same response:
   their in-flight badges for free via the same `backups`/`pendingOperation`
   machinery every other backup uses.
 
+### Provisioning new servers (Java + Bedrock vanilla)
+
+Until this feature, every instance had to be hand-configured: a working
+binary/jar placed in `working_dir` and the exact launch `command` hand-written
+into `pulse.instances.json` before Pulse ever touched it. This lets an admin
+create a real, running server from Panel — deliberately narrow scope (vanilla
+only, latest ~3 versions per edition, Linux-only Java auto-install, fixed
+Java heap, one shared port range) to keep v1 achievable; see "Deliberately
+deferred" below for the exact cuts.
+
+**Version/download-URL resolution lives in Panel, not Pulse** — plain
+outbound `fetch()` calls from Panel's own server code
+(`panel/src/lib/server/versionCatalog.ts`), which works identically on the
+Node adapter and Cloudflare Workers, so no scraping/parsing logic needs to
+live in Pulse and the admin sees resolved versions instantly in the
+create-server form (no heartbeat round-trip just to populate a dropdown).
+Java resolves via Mojang's public `version_manifest_v2.json` — its
+per-version detail JSON includes both `downloads.server.url` and
+`javaVersion.majorVersion` (confirmed live against the real API while
+building this), so there's no hardcoded MC-version-to-Java-version mapping
+table anywhere. Bedrock has no equivalent API — Panel attempts to scrape
+minecraft.net's download page, but **this is confirmed unreliable in
+practice** (a live test during development timed out, likely bot-detection
+or JS rendering) — treated as best-effort throughout: a scrape failure
+yields an empty/stale cached result rather than an error, and the
+create-server form always shows an admin-editable download-URL field for
+Bedrock rather than trusting the scrape blindly. Pulse itself does zero
+version-catalog resolution — it receives a fully-resolved
+`create_instance` payload (concrete version, download URL, required Java
+major version) and just acts on it.
+
+**Java runtime handling is auto-install, Linux-only**
+(`pulse/internal/javaruntime/`): detects an already-installed match first
+(`PATH` + well-known distro glob paths), and if missing, installs via
+`apt-get`/`dnf`/`yum` (whichever is present) using a small hand-maintained
+package-name table (`packageNames` — update by hand as Mojang's
+requirements move, same philosophy as the wire types). **This needs a new
+operational prerequisite**: the Pulse service user needs a scoped
+passwordless-sudo rule for package installation — see "Deploying Pulse to
+a real host" below. Any non-Linux `GOOS`, or a missing package-manager, or
+the install itself failing, fails the command with a clear message rather
+than attempting anything unsafe — never silently falls back to a
+half-working state.
+
+**Provisioning mechanics** (`pulse/internal/provision/`, deliberately
+separate from `internal/backup` — that package's doc explicitly scopes it
+to archive/restore of an *existing* instance, this one only ever runs
+once, before either backup or process-lifecycle code has anything to work
+with): downloads the URL (Java → `server.jar` directly; Bedrock → a temp
+file extracted as a zip, with the same zip-slip defensive check
+`backup/engine.go`'s tar extraction already has — genuinely load-bearing
+here, since this archive comes from a remote third party, not code this
+repo produced itself — and an explicit `chmod 0o755` on `bedrock_server`
+since zip entries don't reliably carry the exec bit), then writes
+`eula.txt` (Java) and patches `server-port` into `server.properties` via a
+new `mcserver.WriteProperty` (exported alongside the existing
+`ReadRCONConfig` reader in `properties.go`, since a freshly-provisioned
+instance's `server.properties` may not exist yet at all — Java's server
+generates most of it on first boot, so partial pre-seeding is the correct
+approach, not a workaround). Bedrock's launch needs
+`LD_LIBRARY_PATH=.` to find its bundled `.so` files — added a new `Env
+[]string` field to `mcserver.InstanceConfig` for this (`Start()` appends
+it to the spawned process's inherited environment), the first instance
+config field with no hand-configured-instance equivalent.
+
+**Dynamic instance registration** (`Manager.AddInstance`,
+`pulse/internal/mcserver/manager.go` + `config_persist.go`'s
+`SaveConfig`): the instance list was, until now, entirely fixed at process
+start (`NewManager(configs)` from one `LoadConfig` file read — there was
+no `AddInstance`-shaped method anywhere in the package). `AddInstance`
+inserts into the in-memory map and atomically rewrites
+`pulse.instances.json` (temp file + `os.Rename`, same directory — atomic
+on POSIX and Windows) in the *same* critical section (`m.mu`), rolling
+back the in-memory insert if the disk write fails, so memory and disk can
+never diverge and two `create_instance` commands landing in the same
+heartbeat batch can't race the write. **This is the concrete precedent to
+follow for the still-unbuilt self-update feature's atomic binary swap.**
+
+**Async command execution — the one exception to `execute()`'s contract**:
+every other command type is a single blocking call that returns a
+terminal `CommandResult` within one heartbeat cycle. `create_instance`
+structurally can't (installing Java, downloading a jar/zip — can take
+minutes). `runLoop` (`pulse/cmd/pulse/main.go`) intercepts it *before*
+`execute()`'s switch and runs it in a goroutine
+(`pulse/cmd/pulse/create_instance.go`'s `creationJob`, tracked in an
+`activeJobs` map that persists across heartbeat iterations), reporting a
+coarse phase (`preparing` → `installing_java` (Java only) → `downloading`
+→ `configuring` → `registering`) via a new `HeartbeatRequest.
+InProgressCommands` field until it finishes, at which point its result
+folds into the normal `pending_command_results` batch on a later
+heartbeat. Panel's `commands.progressPhase` column mirrors this, guarded
+to `status = 'sent'` only (same never-touch-a-terminal-row guard as the
+`pending_command_results` loop) so a late progress report can't clobber a
+row the stale-command sweep already resolved. No other command type needs
+this — don't reach for it unless something is genuinely multi-cycle.
+
+**Port + working-dir placement**: Panel auto-assigns both. Each agent gets
+an admin-configured `portRangeStart`/`portRangeEnd`/`instancesRootDir`
+(new columns on `pulseAgents`, set from the new `/agents/[pulseAgentId]`
+page — the first agent-detail view this project has had; previously the
+dashboard was the only agent-facing UI at all).
+`panel/src/lib/server/portAllocator.ts`'s `allocatePort` picks the first
+free port considering both already-recorded `server_instances.port` values
+*and* ports already claimed by a still-in-flight `create_instance` command
+(parsed from `commands.payload` for `status IN ('queued','sent')` rows) —
+the second check closes a real race, since no `server_instances` row is
+pre-inserted for `create_instance` (unlike backups' pregenerated-row
+pattern: there's no honest `running_state` etc. to give it before Pulse
+ever confirms the instance exists), so two quick create-server submissions
+could otherwise allocate the same port before the first one's instance
+ever showed up in `server_instances`. See "Known gaps" for the allocator's
+one real limitation (blind to legacy hand-configured instances).
+
 ### Deploying Pulse to a real host — currently fully manual
 
 There's no CI/CD or auto-update pipeline yet. The established flow for this
@@ -355,6 +468,15 @@ Verify the swap by checking `Reconcile()` logged an adoption
 (`reconciled instance "X" with already-running pid N`) if a game server
 process was already running, and that Panel's `last_seen_at` updates again
 shortly after.
+
+**New prerequisite for server provisioning**: if Java-edition server
+creation is going to be used on a host, the Pulse service user needs a
+scoped passwordless-sudo rule for package installation (Debian/Ubuntu:
+`apt-get update`/`apt-get install -y openjdk-*`; RHEL/Fedora: `dnf install
+-y java-*-openjdk*`/`yum` equivalent) — see "Provisioning new servers"
+above. Without it, `javaruntime.EnsureInstalled` fails cleanly with a
+message telling the admin to install Java manually instead; Bedrock
+creation needs no such rule.
 
 ### Panel: one codebase, three adapters, one DB abstraction
 
@@ -418,6 +540,11 @@ connection yet. Bit twice during this feature's development.
    across Vanilla/Paper/Forge/Fabric; only graceful stop uses it so far.
 4. **In-game/gameplay commands** — no separate code path; anything typeable
    with `/` in-game rides the same RCON layer once that exists.
+5. **Provisioning** — `create_instance`, layered *before* process-level
+   (there's no process to manage until this completes). See "Provisioning
+   new servers" above. The one command type that doesn't complete
+   synchronously within a single `execute()` call — everything else in
+   this list does.
 
 ### Auth: single admin, no roles (v1 decision)
 
@@ -562,6 +689,21 @@ dashboard header (see STYLE.md).
 - **Restore has never been run against nimo's real backups** (only the
   isolated sandbox, thoroughly) — deliberately left to the user to trigger
   first, given it's destructive even with the safety-backup net.
+- **The port allocator (`panel/src/lib/server/portAllocator.ts`) is blind
+  to legacy hand-configured instances.** It only ever considers ports
+  already recorded on `server_instances` for instances Panel itself
+  created via `create_instance` — a pre-existing hand-configured instance
+  never reports a port on the wire at all, so retrofitting that isn't
+  possible without also teaching Pulse to parse `server.properties` for
+  every instance, not just newly-provisioned ones (out of scope). The
+  admin is responsible for picking a port range that doesn't collide with
+  anything they've already configured outside Panel's knowledge.
+- **Provisioning a new server leaves no automatic cleanup on a Pulse crash
+  mid-provision.** The `commands` row self-heals via `failStaleCommands`,
+  but a partially-downloaded file or half-created directory under
+  `instancesRootDir` has no automatic sweep — matches this project's
+  existing tolerance for similar one-off gaps (e.g. the PID-file bootstrap
+  gap above).
 
 ## Project status / scope
 
@@ -571,29 +713,41 @@ a real production Bedrock server ("nimo", home LAN, Tailscale-reachable):
 - **Pulse**: enrollment, heartbeat (now reporting its own `--interval`),
   start/stop/restart of configured Minecraft processes, RCON graceful stop,
   PID-file process reconciliation across Pulse's own restarts, full backup
-  lifecycle (create/list/delete/download/restore) per "Backups" above.
-  `go build/vet/test` clean, including Windows/macOS cross-compiles.
+  lifecycle (create/list/delete/download/restore) per "Backups" above, and
+  provisioning brand-new Java/Bedrock vanilla servers (Java-runtime
+  auto-install on Linux, download+configure, dynamic instance registration)
+  per "Provisioning new servers" below. `go build/vet/test` clean,
+  including Windows/macOS cross-compiles.
 - **Panel**: single-admin auth, enrollment token generation (now on
   `/settings`), dashboard listing agents/instances with online/offline
   status + accurate in-flight badges, start/stop/restart controls, a
   per-instance backups page (`/instances/[serverInstanceId]`) with
   create/list/delete/download/restore, backup scheduling + retention
   (interval-based automatic backups, keep-count/keep-days pruning, "Apply
-  Retention Now"), a themed confirm modal, 3 working theme palettes.
-  `svelte-check` clean; both `ADAPTER=node` and `ADAPTER=cloudflare`
-  builds pass.
+  Retention Now"), a themed confirm modal, 3 working theme palettes, an
+  agent detail page (`/agents/[pulseAgentId]`, the first agent-facing view
+  beyond the dashboard) with port-range/instances-dir config and a
+  create-server flow. `svelte-check` clean; both `ADAPTER=node` and
+  `ADAPTER=cloudflare` builds pass.
 - Repo pushed to `codenexus/axon` (private), `main` branch.
 
 Deliberately deferred — don't assume half-built unless you find code for it:
 
 - A raw RCON console UI (arbitrary command input) plus dedicated
   whitelist/op/ban forms, file management (plugins/mods browsing,
-  uploads), multi-user auth/RBAC, mDNS/Bonjour discovery, Java-prerequisite
-  install flow, Tauri sidecar process spawning, self-update, and a
-  "Systems"-style multi-node overview page (the current dashboard already
-  lists multiple agents, but nothing like the old mockup's dedicated
-  node-detail/diagnostic-command view
+  uploads), multi-user auth/RBAC, mDNS/Bonjour discovery, Tauri sidecar
+  process spawning, self-update, and a "Systems"-style multi-node overview
+  page (the current dashboard already lists multiple agents, but nothing
+  like the old mockup's dedicated node-detail/diagnostic-command view
   exists).
+- Reusable server "definitions"/templates (the old UI mockup's "Create
+  Definition" concept) — server creation is direct one-shot "create this
+  specific server now," not a saved-template system. Deleting a
+  Panel-created instance. Per-host RAM-based Java heap sizing (fixed
+  `provision.DefaultJavaHeapMB` constant for every Java instance) or any
+  UI control for it. Split port ranges per edition (one shared range per
+  agent covers both). Paper/Forge/Fabric/etc. server software (vanilla
+  only) and anything beyond the latest ~3 versions per edition.
 
 See `PROJECT_LOG.md` for session-by-session history and next steps, and
 `STYLE.md` for UI/UX conventions.

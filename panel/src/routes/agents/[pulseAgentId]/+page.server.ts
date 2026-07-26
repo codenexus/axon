@@ -1,0 +1,61 @@
+import { error, fail } from '@sveltejs/kit';
+import { eq } from 'drizzle-orm';
+import type { Actions, PageServerLoad } from './$types';
+import { pulseAgents, serverInstances } from '$lib/server/db/schema';
+import { failStaleCommands } from '$lib/server/commands';
+
+export const load: PageServerLoad = async ({ params, locals }) => {
+	const [agent] = await locals.db.select().from(pulseAgents).where(eq(pulseAgents.id, params.pulseAgentId));
+	if (!agent) throw error(404, 'agent not found');
+
+	await failStaleCommands(locals.db, agent.id);
+
+	const instances = await locals.db
+		.select()
+		.from(serverInstances)
+		.where(eq(serverInstances.pulseAgentId, agent.id));
+
+	return { agent, instances };
+};
+
+// Empty string means "not set" — distinct from an invalid non-numeric or
+// non-positive value, which is a real input error.
+function parsePositiveIntOrNull(raw: FormDataEntryValue | null): number | null | 'invalid' {
+	const value = String(raw ?? '').trim();
+	if (!value) return null;
+	const parsed = Number(value);
+	if (!Number.isInteger(parsed) || parsed <= 0) return 'invalid';
+	return parsed;
+}
+
+export const actions: Actions = {
+	saveAgentSettings: async ({ request, params, locals }) => {
+		const [agent] = await locals.db.select().from(pulseAgents).where(eq(pulseAgents.id, params.pulseAgentId));
+		if (!agent) return fail(404, { error: 'agent not found' });
+
+		const form = await request.formData();
+		const portRangeStart = parsePositiveIntOrNull(form.get('port_range_start'));
+		const portRangeEnd = parsePositiveIntOrNull(form.get('port_range_end'));
+		const instancesRootDir = String(form.get('instances_root_dir') ?? '').trim();
+
+		if (portRangeStart === 'invalid' || portRangeEnd === 'invalid') {
+			return fail(400, { error: 'port range must be positive whole numbers' });
+		}
+		if (portRangeStart === null || portRangeEnd === null) {
+			return fail(400, { error: 'both a start and end port are required' });
+		}
+		if (portRangeStart >= portRangeEnd) {
+			return fail(400, { error: 'port range start must be less than end' });
+		}
+		if (!instancesRootDir) {
+			return fail(400, { error: 'an instances directory is required' });
+		}
+
+		await locals.db
+			.update(pulseAgents)
+			.set({ portRangeStart, portRangeEnd, instancesRootDir })
+			.where(eq(pulseAgents.id, agent.id));
+
+		return { ok: true };
+	}
+};

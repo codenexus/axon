@@ -12,7 +12,8 @@ export type CommandType =
 	| 'backup_instance'
 	| 'restore_backup'
 	| 'delete_backup'
-	| 'push_backup';
+	| 'push_backup'
+	| 'create_instance';
 
 export async function queueCommand(
 	db: Db,
@@ -34,6 +35,11 @@ export async function queueCommand(
 /** Generates a Panel-owned backup id — Pulse always uses this verbatim as its on-disk filename stem, never inventing its own. */
 export function newBackupId(): string {
 	return `bkp_${randomToken(8)}`;
+}
+
+/** Generates a Panel-owned instance id for create_instance — Pulse uses this verbatim as the new instance's id, never inventing its own. */
+export function newInstanceId(): string {
+	return `inst_${randomToken(8)}`;
 }
 
 export interface CommandOutcome {
@@ -61,9 +67,21 @@ export async function resolveCommandOutcome(
 		.set({
 			status: outcome.success ? 'completed' : 'failed',
 			resultMessage: outcome.message,
-			completedAt: now
+			completedAt: now,
+			progressPhase: null
 		})
 		.where(eq(commands.id, cmd.id));
+
+	if (cmd.type === 'create_instance') {
+		// Nothing else to do here on success — the new instance surfaces
+		// naturally via the existing heartbeat instance-upsert loop once
+		// Pulse's next heartbeat reports it in body.instances. On failure
+		// there's no serverInstances row to clean up either, since none was
+		// pre-inserted (unlike backups' pregenerated-row pattern) — Panel
+		// had no honest running_state/etc. to give it before Pulse ever
+		// confirmed the instance exists.
+		return;
+	}
 
 	if (cmd.type === 'backup_instance' || cmd.type === 'delete_backup') {
 		const payload = cmd.payload ? (JSON.parse(cmd.payload) as BackupCommandPayload) : null;

@@ -48,7 +48,8 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 			runningState: instance.running_state,
 			playerCount: instance.player_count ?? 0,
 			uptimeSeconds: instance.uptime_seconds ?? 0,
-			updatedAt: now
+			updatedAt: now,
+			port: instance.port ?? null
 		};
 		await locals.db
 			.insert(serverInstances)
@@ -69,6 +70,17 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 			{ success: result.success, message: result.message, sizeBytes: result.size_bytes, checksum: result.checksum },
 			now
 		);
+	}
+
+	for (const progress of body.in_progress_commands ?? []) {
+		// Guarded to status='sent' only, same reasoning as the
+		// pending_command_results guard above — never touch an
+		// already-terminal row (e.g. one the stale-command sweep just
+		// failed on a previous heartbeat, racing a late progress report).
+		await locals.db
+			.update(commands)
+			.set({ progressPhase: progress.phase })
+			.where(and(eq(commands.id, progress.command_id), eq(commands.status, 'sent')));
 	}
 
 	// Opportunistic work, all piggybacked on this agent's regular heartbeat

@@ -59,6 +59,10 @@ type InstanceStatus struct {
 	Players        []string     `json:"players"`
 	WorldSizeBytes int64        `json:"world_size_bytes"`
 	UptimeSeconds  int64        `json:"uptime_seconds"`
+	// Port is only populated for instances Pulse itself provisioned via
+	// create_instance — legacy hand-configured instances never report one,
+	// since their launch command/server.properties were never parsed for it.
+	Port int `json:"port,omitempty"`
 }
 
 type HeartbeatRequest struct {
@@ -76,6 +80,21 @@ type HeartbeatRequest struct {
 	// piggybacked onto the next heartbeat rather than pushed immediately
 	// (see spec open question #3 — resolved as next-poll-cycle for v1).
 	PendingCommandResults []CommandResult `json:"pending_command_results,omitempty"`
+	// InProgressCommands reports a coarse phase for commands still running
+	// across multiple heartbeat cycles (currently only create_instance,
+	// which can take minutes — installing Java, downloading a server jar/
+	// zip). Every other command type completes within a single heartbeat
+	// and never appears here.
+	InProgressCommands []CommandProgress `json:"in_progress_commands,omitempty"`
+}
+
+// CommandProgress reports that a long-running command is still in flight
+// and roughly what it's doing — distinct from CommandResult, which is
+// always terminal. Panel must never treat a progress report as resolving
+// the command it names.
+type CommandProgress struct {
+	CommandID string `json:"command_id"`
+	Phase     string `json:"phase"` // "preparing" | "installing_java" | "downloading" | "configuring" | "registering"
 }
 
 type CommandResult struct {
@@ -88,8 +107,12 @@ type CommandResult struct {
 }
 
 type Command struct {
-	ID         string          `json:"id"`
-	Type       string          `json:"type"` // "start_instance" | "stop_instance" | "restart_instance" | "backup_instance" | "restore_backup" | "delete_backup" | "push_backup"
+	ID   string `json:"id"`
+	Type string `json:"type"` // "start_instance" | "stop_instance" | "restart_instance" | "backup_instance" | "restore_backup" | "delete_backup" | "push_backup" | "create_instance"
+	// InstanceID is the id of an existing instance the command targets, for
+	// every type except create_instance — there, Panel pregenerates the id
+	// of the instance being created (which doesn't exist yet), following
+	// the same Panel-owned-id convention as BackupID.
 	InstanceID string          `json:"instance_id"`
 	Payload    json.RawMessage `json:"payload,omitempty"`
 }
@@ -108,6 +131,22 @@ type BackupCommandPayload struct {
 type RestoreCommandPayload struct {
 	BackupID       string `json:"backup_id"`
 	SafetyBackupID string `json:"safety_backup_id"`
+}
+
+// CreateInstanceCommandPayload is the Payload shape for "create_instance".
+// Panel fully resolves the version/download URL/required Java version
+// before ever queuing this — Pulse does zero version or software-catalog
+// resolution itself, it just downloads and configures whatever it's told.
+type CreateInstanceCommandPayload struct {
+	Name         string `json:"name"`
+	GamePlatform string `json:"game_platform"` // "java" | "bedrock"
+	Version      string `json:"version"`
+	SoftwareType string `json:"software_type"` // "vanilla" for v1
+	DownloadURL  string `json:"download_url"`
+	// JavaMajorVersion is 0/omitted for bedrock — no JVM involved.
+	JavaMajorVersion int    `json:"java_major_version,omitempty"`
+	Port             int    `json:"port"`
+	WorkingDir       string `json:"working_dir"`
 }
 
 type HeartbeatResponse struct {

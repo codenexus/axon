@@ -62,7 +62,7 @@ func main() {
 	backupEngine := backup.NewEngine(backupsDir)
 
 	client := protocol.NewClient(cred.ServerURL)
-	runLoop(client, cred, manager, backupEngine, *interval)
+	runLoop(client, cred, manager, backupEngine, *configPath, backupsDir, *interval)
 }
 
 func enroll(serverURL, token string) (*credential.Credential, error) {
@@ -90,10 +90,26 @@ func enroll(serverURL, token string) (*credential.Credential, error) {
 	return cred, nil
 }
 
-func runLoop(client *protocol.Client, cred *credential.Credential, manager *mcserver.Manager, backupEngine *backup.Engine, interval time.Duration) {
+func runLoop(client *protocol.Client, cred *credential.Credential, manager *mcserver.Manager, backupEngine *backup.Engine, configPath, backupsDir string, interval time.Duration) {
 	var pendingResults []protocol.CommandResult
+	// activeJobs tracks create_instance commands still provisioning across
+	// multiple heartbeat cycles — see create_instance.go's package doc.
+	// Every other command type is synchronous within one execute() call and
+	// never appears here.
+	activeJobs := make(map[string]*creationJob)
 
 	for {
+		var inProgress []protocol.CommandProgress
+		for id, job := range activeJobs {
+			done, phase, result := job.snapshot()
+			if done {
+				pendingResults = append(pendingResults, result)
+				delete(activeJobs, id)
+			} else {
+				inProgress = append(inProgress, protocol.CommandProgress{CommandID: id, Phase: phase})
+			}
+		}
+
 		req := protocol.HeartbeatRequest{
 			DeviceID:              cred.DeviceID,
 			Timestamp:             time.Now().Unix(),
@@ -102,6 +118,7 @@ func runLoop(client *protocol.Client, cred *credential.Credential, manager *mcse
 			Instances:             manager.Statuses(),
 			IntervalSeconds:       int(interval.Seconds()),
 			PendingCommandResults: pendingResults,
+			InProgressCommands:    inProgress,
 		}
 
 		resp, err := client.Heartbeat(cred.DeviceCredential, req)
@@ -113,6 +130,10 @@ func runLoop(client *protocol.Client, cred *credential.Credential, manager *mcse
 		pendingResults = nil
 
 		for _, cmd := range resp.Commands {
+			if cmd.Type == "create_instance" {
+				activeJobs[cmd.ID] = startCreateInstanceJob(manager, configPath, backupsDir, cmd)
+				continue
+			}
 			pendingResults = append(pendingResults, execute(client, cred, manager, backupEngine, cmd))
 		}
 
@@ -120,6 +141,10 @@ func runLoop(client *protocol.Client, cred *credential.Credential, manager *mcse
 	}
 }
 
+// execute runs a command synchronously and returns its terminal result
+// within this heartbeat cycle. create_instance is the one exception to that
+// contract (it can take minutes) — runLoop intercepts it before it ever
+// reaches this function; see create_instance.go.
 func execute(client *protocol.Client, cred *credential.Credential, manager *mcserver.Manager, backupEngine *backup.Engine, cmd protocol.Command) protocol.CommandResult {
 	switch cmd.Type {
 	case "start_instance":
