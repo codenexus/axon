@@ -14,7 +14,9 @@ export type CommandType =
 	| 'delete_backup'
 	| 'push_backup'
 	| 'create_instance'
-	| 'console_command';
+	| 'console_command'
+	| 'read_properties'
+	| 'write_properties';
 
 export async function queueCommand(
 	db: Db,

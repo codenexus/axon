@@ -187,6 +187,12 @@ func execute(client *protocol.Client, cred *credential.Credential, manager *mcse
 	case "console_command":
 		return executeConsoleCommand(manager, cmd)
 
+	case "read_properties":
+		return executeReadProperties(manager, cmd)
+
+	case "write_properties":
+		return executeWriteProperties(manager, cmd)
+
 	default:
 		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "unknown command type: " + cmd.Type}
 	}
@@ -373,4 +379,39 @@ func executeConsoleCommand(manager *mcserver.Manager, cmd protocol.Command) prot
 		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: err.Error()}
 	}
 	return protocol.CommandResult{CommandID: cmd.ID, Success: true, Output: output}
+}
+
+// executeReadProperties returns an instance's raw server.properties
+// contents for Panel's raw-text editor — see mcserver.ReadPropertiesFile's
+// doc comment for why this is unparsed text, not structured fields.
+func executeReadProperties(manager *mcserver.Manager, cmd protocol.Command) protocol.CommandResult {
+	cfg, ok := manager.InstanceConfig(cmd.InstanceID)
+	if !ok {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "unknown instance " + cmd.InstanceID}
+	}
+	content, err := mcserver.ReadPropertiesFile(cfg.WorkingDir)
+	if err != nil {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: err.Error()}
+	}
+	return protocol.CommandResult{CommandID: cmd.ID, Success: true, Output: content}
+}
+
+// executeWriteProperties overwrites an instance's server.properties with
+// whatever the admin typed in Panel's editor, verbatim. Changes only take
+// effect on the instance's next start, same as if the admin had edited the
+// file by hand over SSH — this command doesn't restart anything itself.
+func executeWriteProperties(manager *mcserver.Manager, cmd protocol.Command) protocol.CommandResult {
+	var payload protocol.WritePropertiesCommandPayload
+	if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "invalid payload: " + err.Error()}
+	}
+	cfg, ok := manager.InstanceConfig(cmd.InstanceID)
+	if !ok {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "unknown instance " + cmd.InstanceID}
+	}
+	if err := mcserver.WritePropertiesFile(cfg.WorkingDir, payload.Content); err != nil {
+		log.Printf("command %s (%s) failed: %v", cmd.ID, cmd.Type, err)
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: err.Error()}
+	}
+	return protocol.CommandResult{CommandID: cmd.ID, Success: true}
 }

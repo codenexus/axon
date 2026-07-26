@@ -114,7 +114,7 @@ type CommandResult struct {
 
 type Command struct {
 	ID   string `json:"id"`
-	Type string `json:"type"` // "start_instance" | "stop_instance" | "restart_instance" | "backup_instance" | "restore_backup" | "delete_backup" | "push_backup" | "create_instance" | "console_command"
+	Type string `json:"type"` // "start_instance" | "stop_instance" | "restart_instance" | "backup_instance" | "restore_backup" | "delete_backup" | "push_backup" | "create_instance" | "console_command" | "read_properties" | "write_properties"
 	// InstanceID is the id of an existing instance the command targets, for
 	// every type except create_instance — there, Panel pregenerates the id
 	// of the instance being created (which doesn't exist yet), following
@@ -159,6 +159,15 @@ type CreateInstanceCommandPayload struct {
 // arbitrary admin command sent verbatim to the instance's RCON port.
 type ConsoleCommandPayload struct {
 	Command string `json:"command"`
+}
+
+// WritePropertiesCommandPayload is the Payload shape for
+// "write_properties" — the full, verbatim replacement contents for
+// server.properties. "read_properties" needs no payload (like
+// start_instance/stop_instance); its result comes back in
+// CommandResult.Output.
+type WritePropertiesCommandPayload struct {
+	Content string `json:"content"`
 }
 
 type HeartbeatResponse struct {

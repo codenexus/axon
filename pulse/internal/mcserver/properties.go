@@ -2,6 +2,7 @@ package mcserver
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -101,4 +102,46 @@ func WriteProperty(path, key, value string) error {
 	}
 
 	return os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+}
+
+// ReadPropertiesFile returns the raw contents of server.properties in
+// workingDir. Panel never parses this — a raw text editor, not a
+// structured per-key form, so there's no schema here to keep in sync with
+// Mojang's ever-changing property set.
+func ReadPropertiesFile(workingDir string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(workingDir, "server.properties"))
+	if err != nil {
+		return "", fmt.Errorf("read server.properties: %w", err)
+	}
+	return string(data), nil
+}
+
+// WritePropertiesFile atomically overwrites server.properties in workingDir
+// with content exactly as given — unvalidated, same as ReadPropertiesFile
+// not parsing it; Pulse doesn't check Minecraft property syntax either.
+// Atomic (temp file + os.Rename, same directory) so a crash mid-write
+// can't corrupt the file the running server depends on — same approach as
+// SaveConfig (config_persist.go).
+func WritePropertiesFile(workingDir, content string) error {
+	path := filepath.Join(workingDir, "server.properties")
+	tmp, err := os.CreateTemp(workingDir, ".server.properties.*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("close temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("replace server.properties: %w", err)
+	}
+	return nil
 }

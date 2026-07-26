@@ -482,15 +482,49 @@ case, an open question flagged since an earlier session. Resolved as: the
 instance page's transcript (`panel/src/routes/instances/[serverInstanceId]/+page.svelte`,
 reusing the `commands` table directly — no new table, `type='console_command'`
 rows *are* the transcript) polls at the page's normal 3s baseline, but
-drops to 1s specifically while the newest console command is
-`queued`/`sent` (a `$effect` depending on a derived `consoleInFlight`
-boolean naturally tears down and restarts the poll interval at the new
-cadence when it changes) — polling faster doesn't beat Pulse's
-`--interval` floor, but it does shave the perceived wait down to noticing
-the result sooner once Pulse has actually reported it. The transcript
-itself reuses the exact "Sent, waiting…" `badge-pulsing` precedent already
-established for backups/start/stop, rather than pretending to be a live
-console.
+drops to 1s while a console command (or, since properties editing reuses
+this same effect — see "Server properties editor" below — a properties
+load/save) is `queued`/`sent` (a `$effect` depending on a derived
+`fastPollNeeded` boolean naturally tears down and restarts the poll
+interval at the new cadence when it changes) — polling faster doesn't beat
+Pulse's `--interval` floor, but it does shave the perceived wait down to
+noticing the result sooner once Pulse has actually reported it. The
+transcript itself reuses the exact "Sent, waiting…" `badge-pulsing`
+precedent already established for backups/start/stop, rather than
+pretending to be a live console.
+
+### Server properties editor
+
+A raw-text editor for an instance's `server.properties`
+(`ReadPropertiesFile`/`WritePropertiesFile`,
+`pulse/internal/mcserver/properties.go`) on the same instance page as the
+RCON console. **Deliberately raw text, not a structured per-key form** —
+the key set differs by edition/software and changes over time; Panel never
+parses the file, it's opaque content in and content out. Two more
+synchronous command types, `read_properties`/`write_properties`, following
+`console_command`'s exact shape:
+
+- `read_properties` needs no payload; its result comes back in
+  `CommandResult.Output` — the same field added for the RCON console,
+  reused here rather than adding a new one, since "text response for this
+  command" is exactly what both need.
+- `write_properties` carries the full replacement content
+  (`WritePropertiesCommandPayload`) and overwrites the file **atomically**
+  (temp file + `os.Rename`, same directory) — same pattern as
+  `mcserver.SaveConfig` (provisioning), so a crash mid-write can't corrupt
+  the file the running server depends on.
+- No "must be stopped" requirement — `server.properties` is only read at
+  server startup, so editing while running is safe, it just doesn't take
+  effect until a restart (same as hand-editing it over SSH). The UI says
+  so explicitly after a save rather than implying anything changed live.
+- Panel keeps zero server-side cache of "current properties" — `load`
+  queries only the single most recent `read_properties`/`write_properties`
+  command row (`latestPropertiesCommand`), and the instance page's
+  `propertiesText` textarea state applies a completed `read_properties`
+  result to itself exactly once per command id (a `loadedPropertiesCommandId`
+  guard) — the same "apply an incoming result once, never clobber further
+  local edits on a later poll of the same already-applied command"
+  pattern the create-server page's Bedrock-URL prefill already established.
 
 ### Deploying Pulse to a real host — currently fully manual
 
@@ -762,17 +796,20 @@ a real production Bedrock server ("nimo", home LAN, Tailscale-reachable):
   lifecycle (create/list/delete/download/restore) per "Backups" above,
   provisioning brand-new Java/Bedrock vanilla servers (Java-runtime
   auto-install on Linux, download+configure, dynamic instance registration)
-  per "Provisioning new servers" above, and a raw RCON console
-  (`console_command`) per "Raw RCON console" above. `go build/vet/test`
-  clean, including Windows/macOS cross-compiles.
+  per "Provisioning new servers" above, a raw RCON console
+  (`console_command`) per "Raw RCON console" above, and a raw
+  `server.properties` read/write pair (`read_properties`/
+  `write_properties`) per "Server properties editor" above.
+  `go build/vet/test` clean, including Windows/macOS cross-compiles.
 - **Panel**: single-admin auth, enrollment token generation (now on
   `/settings`), dashboard listing agents/instances with online/offline
   status + accurate in-flight badges, start/stop/restart controls, a
   per-instance backups page (`/instances/[serverInstanceId]`) with
   create/list/delete/download/restore, backup scheduling + retention
   (interval-based automatic backups, keep-count/keep-days pruning, "Apply
-  Retention Now"), a raw RCON console transcript on that same page, a
-  themed confirm modal, 3 working theme palettes, an agent detail page
+  Retention Now"), a raw RCON console transcript and a raw
+  `server.properties` text editor on that same page, a themed confirm
+  modal, 3 working theme palettes, an agent detail page
   (`/agents/[pulseAgentId]`, the first agent-facing view beyond the
   dashboard) with port-range/instances-dir config and a create-server
   flow. `svelte-check` clean; both `ADAPTER=node` and `ADAPTER=cloudflare`

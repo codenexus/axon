@@ -104,6 +104,13 @@ export interface ConsoleCommandPayload {
 	command: string;
 }
 
+// Payload shape for write_properties — the full, verbatim replacement
+// contents for server.properties. read_properties needs no payload; its
+// result comes back in CommandResult.output.
+export interface WritePropertiesCommandPayload {
+	content: string;
+}
+
 export interface HeartbeatRequestBody {
 	device_id: string;
 	timestamp: number;

@@ -67,13 +67,27 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 		.limit(20);
 	recentConsoleCommands.reverse();
 
+	const [latestPropertiesCommand] = await locals.db
+		.select()
+		.from(commands)
+		.where(
+			and(
+				eq(commands.pulseAgentId, instance.pulseAgentId),
+				eq(commands.instanceId, instance.instanceId),
+				inArray(commands.type, ['read_properties', 'write_properties'])
+			)
+		)
+		.orderBy(desc(commands.createdAt))
+		.limit(1);
+
 	return {
 		instance,
 		backups: instanceBackups,
 		downloadsByBackupId,
 		agentHeartbeat: agent ?? null,
 		schedule: schedule ?? null,
-		consoleHistory: recentConsoleCommands
+		consoleHistory: recentConsoleCommands,
+		latestPropertiesCommand: latestPropertiesCommand ?? null
 	};
 };
 
@@ -323,6 +337,43 @@ export const actions: Actions = {
 			instanceId: instance.instanceId,
 			type: 'console_command',
 			payload: { command }
+		});
+
+		return { ok: true };
+	},
+
+	loadProperties: async ({ params, locals }) => {
+		const [instance] = await locals.db
+			.select()
+			.from(serverInstances)
+			.where(eq(serverInstances.id, params.serverInstanceId));
+		if (!instance) return fail(404, { error: 'instance not found' });
+
+		await queueCommand(locals.db, {
+			pulseAgentId: instance.pulseAgentId,
+			instanceId: instance.instanceId,
+			type: 'read_properties'
+		});
+
+		return { ok: true };
+	},
+
+	saveProperties: async ({ request, params, locals }) => {
+		const form = await request.formData();
+		const content = form.get('content');
+		if (content === null) return fail(400, { error: 'missing content' });
+
+		const [instance] = await locals.db
+			.select()
+			.from(serverInstances)
+			.where(eq(serverInstances.id, params.serverInstanceId));
+		if (!instance) return fail(404, { error: 'instance not found' });
+
+		await queueCommand(locals.db, {
+			pulseAgentId: instance.pulseAgentId,
+			instanceId: instance.instanceId,
+			type: 'write_properties',
+			payload: { content: String(content) }
 		});
 
 		return { ok: true };

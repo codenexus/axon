@@ -30,24 +30,28 @@
 		return backup.trigger === 'pre_restore' && backup.status === 'pending';
 	}
 
-	// A console command sent now only reaches Pulse on its next heartbeat,
-	// and the response comes back on the heartbeat after that — polling
-	// faster here doesn't beat that floor, but it does shave the perceived
-	// wait down to noticing the result sooner once Pulse has actually
-	// reported it.
+	// A console command (or a properties load/save) sent now only reaches
+	// Pulse on its next heartbeat, and the response comes back on the
+	// heartbeat after that — polling faster here doesn't beat that floor,
+	// but it does shave the perceived wait down to noticing the result
+	// sooner once Pulse has actually reported it.
 	const consoleInFlight = $derived(
 		data.consoleHistory.some((c) => c.status === 'queued' || c.status === 'sent')
 	);
+	const propertiesInFlight = $derived(
+		data.latestPropertiesCommand?.status === 'queued' || data.latestPropertiesCommand?.status === 'sent'
+	);
+	const fastPollNeeded = $derived(consoleInFlight || propertiesInFlight);
 
 	// Poll unconditionally while this page is open, rather than only while
 	// this page's own data already shows something in flight — that
 	// reactive-only approach misses a backup queued from elsewhere (another
 	// tab, the API directly) while this tab sat idle, since nothing would
 	// tell an idle tab to start checking. Re-runs (tearing down and
-	// restarting the interval at the new cadence) whenever consoleInFlight
+	// restarting the interval at the new cadence) whenever fastPollNeeded
 	// changes, since $effect re-executes when its reactive dependencies do.
 	$effect(() => {
-		const ms = consoleInFlight ? 1000 : 3000;
+		const ms = fastPollNeeded ? 1000 : 3000;
 		const interval = setInterval(() => invalidateAll(), ms);
 		return () => clearInterval(interval);
 	});
@@ -140,6 +144,27 @@
 			if (result.type === 'success') consoleForm?.reset();
 		};
 	}
+
+	// The editable textarea's content, plus a guard tracking which
+	// completed command's result has already been applied to it — without
+	// the guard, every 1s/3s poll would re-run this effect and stomp
+	// whatever the admin is currently typing back to the last loaded
+	// value. Only a genuinely new completed command (by id) updates the
+	// textarea, and only for read_properties (a completed write_properties
+	// doesn't change what's shown — Panel already knows what it just sent).
+	let propertiesText = $state('');
+	let loadedPropertiesCommandId = $state<string | null>(null);
+	$effect(() => {
+		const cmd = data.latestPropertiesCommand;
+		if (!cmd || cmd.status !== 'completed' || cmd.id === loadedPropertiesCommandId) return;
+		if (cmd.type === 'read_properties') propertiesText = cmd.output ?? '';
+		loadedPropertiesCommandId = cmd.id;
+	});
+
+	const propertiesPhaseLabel: Record<string, string> = {
+		read_properties: 'Loading…',
+		write_properties: 'Saving…'
+	};
 </script>
 
 <svelte:head>
@@ -204,6 +229,36 @@
 					</li>
 				{/each}
 			</ul>
+		{/if}
+	</section>
+
+	<section class="card">
+		<div class="section-header">
+			<h2>Server Properties</h2>
+			<form method="POST" action="?/loadProperties" use:enhance>
+				<button type="submit" class="ghost">Load current properties</button>
+			</form>
+		</div>
+
+		{#if data.latestPropertiesCommand?.status === 'queued' || data.latestPropertiesCommand?.status === 'sent'}
+			<span class="badge badge-warning badge-pulsing">
+				{propertiesPhaseLabel[data.latestPropertiesCommand.type] ?? 'Working…'}
+			</span>
+		{/if}
+		{#if data.latestPropertiesCommand?.status === 'failed'}
+			<p class="error">{data.latestPropertiesCommand.resultMessage}</p>
+		{/if}
+		{#if data.latestPropertiesCommand?.type === 'write_properties' && data.latestPropertiesCommand.status === 'completed'}
+			<p class="meta">Saved. Restart the server (from the dashboard) for these changes to take effect.</p>
+		{/if}
+
+		{#if loadedPropertiesCommandId}
+			<form method="POST" action="?/saveProperties" use:enhance class="properties-form">
+				<textarea name="content" bind:value={propertiesText} rows="12" spellcheck="false"></textarea>
+				<button type="submit">Save</button>
+			</form>
+		{:else if !data.latestPropertiesCommand}
+			<p class="empty">Nothing loaded yet.</p>
 		{/if}
 	</section>
 
@@ -434,6 +489,30 @@
 
 	.section-header h2 {
 		margin: 0;
+	}
+
+	.properties-form {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+		margin-top: 0.75rem;
+	}
+
+	.properties-form textarea {
+		width: 100%;
+		box-sizing: border-box;
+		padding: 0.625rem;
+		border-radius: 0.375rem;
+		border: 1px solid var(--axon-accent);
+		background: var(--axon-background);
+		color: var(--axon-text);
+		font-family: monospace;
+		font-size: 0.8rem;
+		resize: vertical;
+	}
+
+	.properties-form button {
+		align-self: flex-start;
 	}
 
 	.console-form {
