@@ -52,14 +52,26 @@ export interface CommandResult {
 	command_id: string;
 	success: boolean;
 	message?: string;
-	// Set on a successful backup_instance result.
+	// Set on a successful backup_instance result; also set on a successful
+	// upload_file result (bytes written).
 	size_bytes?: number;
 	checksum?: string; // sha256 hex
-	// The RCON response text for a console_command result — populated
-	// whenever the RCON round-trip itself succeeded, even if the game
-	// rejected the command. message stays reserved for "the RCON exchange
-	// itself failed."
+	// Free-text carrying a command's actual response, reused across three
+	// unrelated command types: RCON response text for console_command
+	// (populated whenever the RCON round-trip itself succeeded, even if the
+	// game rejected the command); raw server.properties content for
+	// read_properties; a JSON-encoded FileEntry[] for list_files. message
+	// stays reserved for "the command itself failed" in all three cases.
 	output?: string;
+}
+
+// Wire shape of a filemanager.Entry — one row in a list_files result.
+export interface FileEntry {
+	name: string;
+	path: string;
+	is_dir: boolean;
+	size_bytes: number;
+	mod_time_ms: number;
 }
 
 // Payload shape for backup_instance / delete_backup / push_backup commands.
@@ -109,6 +121,26 @@ export interface ConsoleCommandPayload {
 // result comes back in CommandResult.output.
 export interface WritePropertiesCommandPayload {
 	content: string;
+}
+
+// Payload shape for list_files — the working_dir-relative directory to
+// list ('' or '.' for the root).
+export interface ListFilesCommandPayload {
+	path: string;
+}
+
+// Payload shape for upload_file. target_path is the full working_dir-
+// relative destination (directory + filename); holding_id is the
+// fileUploads row id Pulse fetches the bytes from.
+export interface UploadFileCommandPayload {
+	target_path: string;
+	holding_id: string;
+}
+
+// Payload shape for delete_file — the working_dir-relative file or
+// directory to remove (recursively, if a directory).
+export interface DeleteFileCommandPayload {
+	path: string;
 }
 
 export interface HeartbeatRequestBody {

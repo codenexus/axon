@@ -15,6 +15,7 @@ import (
 
 	"github.com/codenexus/axon/pulse/internal/backup"
 	"github.com/codenexus/axon/pulse/internal/credential"
+	"github.com/codenexus/axon/pulse/internal/filemanager"
 	"github.com/codenexus/axon/pulse/internal/inventory"
 	"github.com/codenexus/axon/pulse/internal/mcserver"
 	"github.com/codenexus/axon/pulse/internal/protocol"
@@ -192,6 +193,15 @@ func execute(client *protocol.Client, cred *credential.Credential, manager *mcse
 
 	case "write_properties":
 		return executeWriteProperties(manager, cmd)
+
+	case "list_files":
+		return executeListFiles(manager, cmd)
+
+	case "upload_file":
+		return executeUploadFile(client, cred, manager, cmd)
+
+	case "delete_file":
+		return executeDeleteFile(manager, cmd)
 
 	default:
 		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "unknown command type: " + cmd.Type}
@@ -414,4 +424,73 @@ func executeWriteProperties(manager *mcserver.Manager, cmd protocol.Command) pro
 		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: err.Error()}
 	}
 	return protocol.CommandResult{CommandID: cmd.ID, Success: true}
+}
+
+// executeListFiles returns a JSON-encoded []filemanager.Entry for the
+// requested directory, in CommandResult.Output — the third reuse of that
+// field (after RCON output and raw server.properties content).
+func executeListFiles(manager *mcserver.Manager, cmd protocol.Command) protocol.CommandResult {
+	var payload protocol.ListFilesCommandPayload
+	if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "invalid payload: " + err.Error()}
+	}
+	cfg, ok := manager.InstanceConfig(cmd.InstanceID)
+	if !ok {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "unknown instance " + cmd.InstanceID}
+	}
+	entries, err := filemanager.List(cfg.WorkingDir, payload.Path)
+	if err != nil {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: err.Error()}
+	}
+	out, err := json.Marshal(entries)
+	if err != nil {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "encode listing: " + err.Error()}
+	}
+	return protocol.CommandResult{CommandID: cmd.ID, Success: true, Output: string(out)}
+}
+
+// executeDeleteFile removes a file or directory (recursively) from the
+// instance's working_dir.
+func executeDeleteFile(manager *mcserver.Manager, cmd protocol.Command) protocol.CommandResult {
+	var payload protocol.DeleteFileCommandPayload
+	if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "invalid payload: " + err.Error()}
+	}
+	cfg, ok := manager.InstanceConfig(cmd.InstanceID)
+	if !ok {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "unknown instance " + cmd.InstanceID}
+	}
+	if err := filemanager.Delete(cfg.WorkingDir, payload.Path); err != nil {
+		log.Printf("command %s (%s) failed: %v", cmd.ID, cmd.Type, err)
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: err.Error()}
+	}
+	return protocol.CommandResult{CommandID: cmd.ID, Success: true}
+}
+
+// executeUploadFile pulls a file's bytes FROM Panel's transient holding
+// area and saves them into working_dir — the reversed transfer direction
+// of executePushBackup, still with Pulse as the only side that ever dials
+// out (see protocol.Client.PullFileUpload's doc comment).
+func executeUploadFile(client *protocol.Client, cred *credential.Credential, manager *mcserver.Manager, cmd protocol.Command) protocol.CommandResult {
+	var payload protocol.UploadFileCommandPayload
+	if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "invalid payload: " + err.Error()}
+	}
+	cfg, ok := manager.InstanceConfig(cmd.InstanceID)
+	if !ok {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "unknown instance " + cmd.InstanceID}
+	}
+
+	body, err := client.PullFileUpload(cred.DeviceCredential, payload.HoldingID, cmd.InstanceID)
+	if err != nil {
+		log.Printf("command %s (%s) failed: %v", cmd.ID, cmd.Type, err)
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: err.Error()}
+	}
+	defer body.Close()
+
+	size, err := filemanager.Save(cfg.WorkingDir, payload.TargetPath, body)
+	if err != nil {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: err.Error()}
+	}
+	return protocol.CommandResult{CommandID: cmd.ID, Success: true, SizeBytes: size}
 }

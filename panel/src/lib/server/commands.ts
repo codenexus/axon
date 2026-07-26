@@ -16,7 +16,10 @@ export type CommandType =
 	| 'create_instance'
 	| 'console_command'
 	| 'read_properties'
-	| 'write_properties';
+	| 'write_properties'
+	| 'list_files'
+	| 'upload_file'
+	| 'delete_file';
 
 export async function queueCommand(
 	db: Db,
@@ -43,6 +46,11 @@ export function newBackupId(): string {
 /** Generates a Panel-owned instance id for create_instance — Pulse uses this verbatim as the new instance's id, never inventing its own. */
 export function newInstanceId(): string {
 	return `inst_${randomToken(8)}`;
+}
+
+/** Generates a Panel-owned id for a held file upload — see fileUploads.ts. */
+export function newFileUploadId(): string {
+	return `fup_${randomToken(8)}`;
 }
 
 export interface CommandOutcome {

@@ -50,6 +50,13 @@
       "when": 1785030449010,
       "tag": "0006_majestic_power_pack",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1785090922733,
+      "tag": "0007_smooth_eddie_brock",
+      "breakpoints": true
     }
   ]
 }

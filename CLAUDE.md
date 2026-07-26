@@ -526,6 +526,75 @@ synchronous command types, `read_properties`/`write_properties`, following
   local edits on a later poll of the same already-applied command"
   pattern the create-server page's Bedrock-URL prefill already established.
 
+### File management (browse/upload/delete an instance's working_dir)
+
+Own dedicated route (`/instances/[serverInstanceId]/files`, not a card on
+the instance page — enough surface, matching the `new-instance`-style
+convention of "a real flow gets its own URL"). Whole `working_dir` tree is
+browsable, not restricted to a hardcoded `plugins`/`mods` folder — those
+names aren't even consistent across server software.
+
+**`pulse/internal/filemanager/`** — a new package, distinct from `mcserver`
+(process lifecycle), `backup` (whole-tree archive/restore), and
+`provision` (one-time software acquisition): `List` (non-recursive,
+directories-first), `Delete` (recursive, explicitly rejects deleting
+`working_dir` itself), `Save` (atomic temp-file+rename, same pattern as
+`WritePropertiesFile`/`SaveConfig`). Every function funnels through a
+`resolve()` helper that rejects any admin-supplied path escaping
+`working_dir` — **load-bearing here**, unlike `backup`'s and `provision`'s
+identical `withinRoot` helpers (duplicated per-package, not shared), since
+every path this package touches is admin-controlled, not
+Pulse-self-produced. Lexical check only, same limitation those two already
+carry — doesn't dereference symlinks; not a new gap, documented via an
+explicit test rather than silently assumed.
+
+**Uploads need bytes to flow *into* Pulse — the second reversed-transfer
+pattern, after backup downloads.** Pulse never accepts inbound
+connections, so the admin uploads to Panel first (a normal browser
+request, held transiently in `file_uploads` — simpler than
+`backup_downloads`' shape, one status set and one TTL, since the browser
+action already has the complete file on disk before the row exists, no
+"requested but not ready" window to represent), then Pulse *pulls* it on
+its own next heartbeat via `(*protocol.Client).PullFileUpload` (a `GET`
+Pulse itself initiates, mirroring `PushBackup` reversed) against
+`GET /api/v1/files/[holdingId]/download` — a genuine hybrid of the two
+existing backup-transfer routes: **auth** like the backup-upload route
+(bearer device-credential, since Pulse calls it), **streaming +
+delivery-confirmed cleanup** like `download-file`.
+
+**`CommandResult.Output`'s third reuse**: `list_files`'s result is a
+JSON-encoded `[]filemanager.Entry` in the same free-text field already
+carrying RCON output and raw properties content — see that field's doc
+comment (both `types.go` and `protocol.ts`) for all three uses in one
+place. `resolveCommandOutcome` needs no branch for any of the three new
+command types (`list_files`/`delete_file` have no dependent row;
+`upload_file`'s only dependent row, `file_uploads`, already resolves as a
+side effect of the download route being hit — by the time Pulse can report
+`upload_file`'s outcome, it has necessarily already called
+`PullFileUpload`, so the download route's stream-end/error handlers have
+already settled it in every normal case; the one gap, Pulse never calling
+`PullFileUpload` at all, is covered by `pruneExpiredFileUploads`'s TTL
+sweep, the same backstop `pruneExpiredDownloads` provides for the
+equivalent `push_backup` gap).
+
+**Delete is the one destructive action this session that gets
+`ConfirmModal`** where several other destructive-ish actions deliberately
+didn't (plain backup delete, console commands, properties save) — the
+combination here is different in kind: an admin-navigable *arbitrary*
+subtree, one click, *recursive* (`os.RemoveAll`), no listing of contents
+shown first, no easy undo/recreate path the way a backup or a console
+command has.
+
+**A real, pre-existing bug found and fixed while building this**:
+`@sveltejs/adapter-node`'s built server caps every request body at `512K`
+by default (`BODY_SIZE_LIMIT`) — confirmed live (a >512K upload got a
+clean `413` without the env var raised, and succeeded once
+`BODY_SIZE_LIMIT=Infinity` was set). This silently affected the existing
+`push_backup` upload route too, not just this feature — `vite dev` never
+enforces it, only the built server does, which is why it went unnoticed
+through this project's whole development-so-far. See `panel/README.md`'s
+"Running the built adapter-node server directly" section.
+
 ### Deploying Pulse to a real host — currently fully manual
 
 There's no CI/CD or auto-update pipeline yet. The established flow for this
@@ -797,9 +866,11 @@ a real production Bedrock server ("nimo", home LAN, Tailscale-reachable):
   provisioning brand-new Java/Bedrock vanilla servers (Java-runtime
   auto-install on Linux, download+configure, dynamic instance registration)
   per "Provisioning new servers" above, a raw RCON console
-  (`console_command`) per "Raw RCON console" above, and a raw
+  (`console_command`) per "Raw RCON console" above, a raw
   `server.properties` read/write pair (`read_properties`/
-  `write_properties`) per "Server properties editor" above.
+  `write_properties`) per "Server properties editor" above, and file
+  management (`list_files`/`upload_file`/`delete_file`,
+  `pulse/internal/filemanager/`) per "File management" above.
   `go build/vet/test` clean, including Windows/macOS cross-compiles.
 - **Panel**: single-admin auth, enrollment token generation (now on
   `/settings`), dashboard listing agents/instances with online/offline
@@ -808,8 +879,9 @@ a real production Bedrock server ("nimo", home LAN, Tailscale-reachable):
   create/list/delete/download/restore, backup scheduling + retention
   (interval-based automatic backups, keep-count/keep-days pruning, "Apply
   Retention Now"), a raw RCON console transcript and a raw
-  `server.properties` text editor on that same page, a themed confirm
-  modal, 3 working theme palettes, an agent detail page
+  `server.properties` text editor on that same page, a file browser
+  (`/instances/[serverInstanceId]/files` — browse/upload/delete), a themed
+  confirm modal, 3 working theme palettes, an agent detail page
   (`/agents/[pulseAgentId]`, the first agent-facing view beyond the
   dashboard) with port-range/instances-dir config and a create-server
   flow. `svelte-check` clean; both `ADAPTER=node` and `ADAPTER=cloudflare`
@@ -821,11 +893,10 @@ Deliberately deferred — don't assume half-built unless you find code for it:
 - Dedicated whitelist/op/ban forms (structured UI around specific RCON
   commands — the raw console can already run `/whitelist add`, `/op`,
   `/ban` etc. verbatim, this would be purpose-built forms around them),
-  file management (plugins/mods browsing, uploads), multi-user auth/RBAC,
-  mDNS/Bonjour discovery, Tauri sidecar process spawning, self-update, and
-  a "Systems"-style multi-node overview page (the current dashboard
-  already lists multiple agents, but nothing like the old mockup's
-  dedicated node-detail/diagnostic-command view exists).
+  multi-user auth/RBAC, mDNS/Bonjour discovery, Tauri sidecar process
+  spawning, self-update, and a "Systems"-style multi-node overview page
+  (the current dashboard already lists multiple agents, but nothing like
+  the old mockup's dedicated node-detail/diagnostic-command view exists).
 - Reusable server "definitions"/templates (the old UI mockup's "Create
   Definition" concept) — server creation is direct one-shot "create this
   specific server now," not a saved-template system. Deleting a

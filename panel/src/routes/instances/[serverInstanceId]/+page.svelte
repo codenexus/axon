@@ -178,6 +178,7 @@
 			<h1>{data.instance.name}</h1>
 			<p class="meta">{data.instance.gamePlatform} · {data.instance.softwareType} {data.instance.version}</p>
 		</div>
+		<a class="ghost-link" href="/instances/{data.instance.id}/files">Files →</a>
 	</header>
 
 	<section class="card">
@@ -453,6 +454,10 @@
 	}
 
 	header {
+		display: flex;
+		justify-content: space-between;
+		align-items: flex-start;
+		gap: 1rem;
 		margin-bottom: 1.5rem;
 	}
 

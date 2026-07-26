@@ -4,6 +4,7 @@ import type { RequestHandler } from './$types';
 import { commands, pulseAgents, serverInstances } from '$lib/server/db/schema';
 import { failStaleCommands, resolveCommandOutcome } from '$lib/server/commands';
 import { pruneExpiredDownloads } from '$lib/server/backupDownloads';
+import { pruneExpiredFileUploads } from '$lib/server/fileUploads';
 import { runSchedulesForAgent } from '$lib/server/backupSchedules';
 import { bearerToken } from '$lib/server/http';
 import { sha256Hex } from '$lib/server/tokens';
@@ -100,6 +101,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 	// scheduled backup_instance, or a retention delete_backup) is picked up
 	// and sent in this same response.
 	await pruneExpiredDownloads(locals.db, agent.id);
+	await pruneExpiredFileUploads(locals.db, agent.id);
 	await failStaleCommands(locals.db, agent.id);
 	await runSchedulesForAgent(locals.db, agent.id, now);
 

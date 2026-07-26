@@ -73,6 +73,32 @@ func (c *Client) PushBackup(deviceCredential, backupID, instanceID string, r io.
 	return nil
 }
 
+// PullFileUpload fetches a held upload's bytes from Panel, in response to
+// an upload_file command — the reversed direction of PushBackup, but the
+// same principle: Pulse is always the side that dials out, never Panel.
+// Caller must Close() the returned body. Uses uploadHTTPClient (no
+// timeout) for the same reason PushBackup does — a large plugin/mod file
+// must not be aborted by HTTPClient's blanket 15s.
+func (c *Client) PullFileUpload(deviceCredential, holdingID, instanceID string) (io.ReadCloser, error) {
+	httpReq, err := http.NewRequest(http.MethodGet, c.ServerURL+"/api/v1/files/"+holdingID+"/download", nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+deviceCredential)
+	httpReq.Header.Set("X-Axon-Instance-Id", instanceID)
+
+	resp, err := c.uploadHTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("pull file upload %s: %w", holdingID, err)
+	}
+	if resp.StatusCode >= 300 {
+		defer resp.Body.Close()
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("pull file upload %s returned %d: %s", holdingID, resp.StatusCode, string(respBody))
+	}
+	return resp.Body, nil
+}
+
 func (c *Client) post(path, bearer string, body any, out any) error {
 	buf, err := json.Marshal(body)
 	if err != nil {

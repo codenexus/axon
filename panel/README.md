@@ -31,6 +31,15 @@ with 403. `pnpm run dev` doesn't need this (Vite's dev server sets it for
 you); only the built server does. Tauri's sidecar (once implemented) will
 need to set the same env var when it spawns `build/index.js`.
 
+It also needs `BODY_SIZE_LIMIT` raised — `@sveltejs/adapter-node`'s built
+server caps every request body at `512K` by default, silently rejecting
+anything bigger (a real backup archive via `push_backup`'s upload route, or
+a plugin/mod file via the file management upload route). `pnpm run dev`
+doesn't enforce this either (only the built server does), which is why it's
+easy to miss locally. Set e.g. `BODY_SIZE_LIMIT=Infinity` (or a specific
+generous byte count) for any real deployment. Tauri's sidecar will need the
+same env var for the same reason as `ORIGIN` above.
+
 ### Cloudflare target
 
 Not needed for local dev — only when actually testing/deploying the hosted

@@ -70,7 +70,7 @@ export const commands = sqliteTable('commands', {
 	id: text('id').primaryKey(),
 	pulseAgentId: text('pulse_agent_id').notNull(),
 	instanceId: text('instance_id').notNull(),
-	// "start_instance" | "stop_instance" | "restart_instance" | "backup_instance" | "restore_backup" | "delete_backup" | "push_backup" | "create_instance" | "console_command"
+	// "start_instance" | "stop_instance" | "restart_instance" | "backup_instance" | "restore_backup" | "delete_backup" | "push_backup" | "create_instance" | "console_command" | "read_properties" | "write_properties" | "list_files" | "upload_file" | "delete_file"
 	type: text('type').notNull(),
 	// JSON-stringified command-specific payload (e.g. BackupCommandPayload); null for start/stop.
 	payload: text('payload'),
@@ -85,9 +85,10 @@ export const commands = sqliteTable('commands', {
 	// Null once terminal (completed/failed) or for command types that
 	// never report progress.
 	progressPhase: text('progress_phase'),
-	// The RCON response text for a console_command result — populated
-	// whenever the RCON round-trip itself succeeded, even if the game
-	// rejected the command. Null for every other command type.
+	// Free-text carrying a command's actual response, reused across three
+	// unrelated command types: RCON response text for console_command, raw
+	// server.properties content for read_properties, a JSON-encoded
+	// FileEntry[] for list_files. Null for every other command type.
 	output: text('output')
 });
 
@@ -150,4 +151,25 @@ export const backupDownloads = sqliteTable('backup_downloads', {
 	requestedAt: integer('requested_at').notNull(),
 	readyAt: integer('ready_at'),
 	expiresAt: integer('expires_at')
+});
+
+// Transient — the reversed direction of backupDownloads: the admin
+// uploads a file to Panel first (a normal browser request), Panel holds
+// it here, then Pulse pulls it on its own next heartbeat (see
+// api/v1/files/[holdingId]/download). Simpler status set than
+// backupDownloads' — no "requested"/"pending" state, since the
+// browser-upload action already has the complete file on disk before this
+// row is ever created, unlike push_backup's genuinely asynchronous
+// readiness.
+export const fileUploads = sqliteTable('file_uploads', {
+	id: text('id').primaryKey(), // fup_<random>
+	pulseAgentId: text('pulse_agent_id').notNull(), // denormalized for the download route's auth check
+	instanceId: text('instance_id').notNull(), // Pulse-local instance id, cross-checked against X-Axon-Instance-Id like the backup upload route does
+	targetPath: text('target_path').notNull(), // working_dir-relative destination Pulse will Save() to
+	filePath: text('file_path').notNull(), // absolute path in Panel's local holding dir
+	status: text('status').notNull(), // "ready" | "fetched" | "failed" | "expired"
+	sizeBytes: integer('size_bytes'),
+	errorMessage: text('error_message'),
+	createdAt: integer('created_at').notNull(),
+	expiresAt: integer('expires_at') // TTL backstop for a hold nobody's Pulse agent ever came to collect
 });

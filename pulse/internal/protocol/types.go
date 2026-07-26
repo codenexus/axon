@@ -101,20 +101,26 @@ type CommandResult struct {
 	CommandID string `json:"command_id"`
 	Success   bool   `json:"success"`
 	Message   string `json:"message,omitempty"`
-	// SizeBytes and Checksum are set on a successful backup_instance result.
+	// SizeBytes and Checksum are set on a successful backup_instance result;
+	// SizeBytes is also set on a successful upload_file result (the number
+	// of bytes Save() wrote).
 	SizeBytes int64  `json:"size_bytes,omitempty"`
 	Checksum  string `json:"checksum,omitempty"` // sha256 hex
-	// Output is the RCON response text for a console_command result —
-	// populated whenever the RCON round-trip itself succeeded, even if the
-	// game rejected the command (e.g. "Unknown command" is still a
-	// successful exchange). Message stays reserved for "the RCON exchange
-	// itself failed" (not running, not configured, unreachable, bad auth).
+	// Output is free-text carrying a command's actual response, reused
+	// across three unrelated command types rather than each growing its own
+	// single-purpose field: RCON response text for console_command
+	// (populated whenever the RCON round-trip itself succeeded, even if the
+	// game rejected the command — e.g. "Unknown command" is still a
+	// successful exchange); raw server.properties content for
+	// read_properties; a JSON-encoded []filemanager.Entry for list_files.
+	// Message stays reserved for "the command itself failed" in all three
+	// cases.
 	Output string `json:"output,omitempty"`
 }
 
 type Command struct {
 	ID   string `json:"id"`
-	Type string `json:"type"` // "start_instance" | "stop_instance" | "restart_instance" | "backup_instance" | "restore_backup" | "delete_backup" | "push_backup" | "create_instance" | "console_command" | "read_properties" | "write_properties"
+	Type string `json:"type"` // "start_instance" | "stop_instance" | "restart_instance" | "backup_instance" | "restore_backup" | "delete_backup" | "push_backup" | "create_instance" | "console_command" | "read_properties" | "write_properties" | "list_files" | "upload_file" | "delete_file"
 	// InstanceID is the id of an existing instance the command targets, for
 	// every type except create_instance — there, Panel pregenerates the id
 	// of the instance being created (which doesn't exist yet), following
@@ -168,6 +174,28 @@ type ConsoleCommandPayload struct {
 // CommandResult.Output.
 type WritePropertiesCommandPayload struct {
 	Content string `json:"content"`
+}
+
+// ListFilesCommandPayload is the Payload shape for "list_files" — the
+// working_dir-relative directory to list ("" or "." for the root).
+type ListFilesCommandPayload struct {
+	Path string `json:"path"`
+}
+
+// UploadFileCommandPayload is the Payload shape for "upload_file".
+// TargetPath is the full working_dir-relative destination (directory +
+// filename); HoldingID is the fileUploads row id Pulse fetches the bytes
+// from via PullFileUpload.
+type UploadFileCommandPayload struct {
+	TargetPath string `json:"target_path"`
+	HoldingID  string `json:"holding_id"`
+}
+
+// DeleteFileCommandPayload is the Payload shape for "delete_file" — the
+// working_dir-relative file or directory to remove (recursively, if a
+// directory).
+type DeleteFileCommandPayload struct {
+	Path string `json:"path"`
 }
 
 type HeartbeatResponse struct {
