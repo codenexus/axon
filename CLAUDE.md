@@ -949,6 +949,14 @@ trademark consideration for the OSS project. The theme switcher lives on
   rather than adding a parallel reporting channel, and populate them based
   on which *step* succeeded, not just overall pass/fail (see restore's
   safety-backup reporting above).
+- **A TTL-cached lookup table must scope every read/write (fresh, stale,
+  replace) by every dimension of its own cache key, not just some of
+  them.** `versionCatalogEntries` is keyed by
+  `` `${gamePlatform}:${softwareType}:${version}` `` — a real bug this
+  session came from `replaceEntries` filtering only on `gamePlatform`,
+  which would have silently wiped every other software type's cached
+  entries on a single-software-type refresh. If a cache key has N parts,
+  every query touching that cache needs all N in its `WHERE`.
 - **Go: one `internal/<concern>/` package per concern**
   (`protocol`, `credential`, `mcserver`, `inventory`, `backup`, `rcon`,
   `filemanager`, `provision`, `javaruntime`, `updater`), platform-specific

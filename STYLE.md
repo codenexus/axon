@@ -2,10 +2,13 @@
 
 UI/UX and styling conventions for Axon Panel. Established from the first
 vertical slice (`panel/src/routes/+page.svelte`, `login/+page.svelte`,
-`lib/theme/`) and extended by the backups feature
+`lib/theme/`), extended by the backups feature
 (`instances/[serverInstanceId]/+page.svelte`, `settings/+page.svelte`,
-`lib/components/ConfirmModal.svelte`) — follow these rather than
-introducing new patterns per component.
+`lib/components/ConfirmModal.svelte`), and further extended by the RCON
+console/diagnostics-runner, file management, and provisioning/server-
+definitions features (see "Command transcript", "Compact inline admin
+form + table", and "Cascading/dependent selects" below) — follow these
+rather than introducing new patterns per component.
 
 ## Theming
 
@@ -144,6 +147,42 @@ Stick to these values rather than inventing new ones:
   (`formEl.requestSubmit()`) from `onConfirm` — see the Restore button in
   `instances/[serverInstanceId]/+page.svelte` for the reference
   implementation.
+
+- **Command transcript** (`.console-log` / `.console-entry-header` /
+  `.console-output`, first built for the raw RCON console on the instance
+  page): a `<ul>` of `<li>` entries, each showing the sent command as
+  `<code>&gt; {command}</code>` plus a status badge (`badge-pulsing`
+  "Sent, waiting…" while `queued`/`sent`, `badge-error` "Failed"), and —
+  once `completed` — a `<pre class="console-output">` block with the raw
+  result text (or the failure message when `failed`). Reused verbatim,
+  same class names, on the agent-detail page's host-diagnostics runner
+  (same "admin sends a command, result only arrives on a later heartbeat"
+  shape) — duplicated per-file, same reasoning as `.ghost-link`/
+  `.badge-pulsing` above. Reach for this exact shape for any future
+  "queue a command, show its result once Pulse reports it" UI rather than
+  a bespoke transcript.
+- **Compact inline admin form + table** (`.release-form` + `.releases`
+  table, `/settings`): a horizontal, wrapping form
+  (`display: flex; align-items: flex-end; gap: 0.75rem; flex-wrap: wrap`)
+  with each `<label>` sized to its content, plus a `.wide` modifier
+  (`flex: 1 1 16rem`) for a field that should absorb remaining space,
+  followed by a plain bordered `<table class="releases">` listing
+  existing rows (thin `border-bottom` per row, header cells at
+  `opacity: 0.7`). Used for "Publish Pulse release" and "Server
+  Definitions". This is the layout for "admin adds one row to a global
+  config list" — distinct from the vertical `.create-form` stack (single
+  primary action, e.g. creating one server), which stays vertical.
+- **Cascading/dependent selects** (the create-server and
+  server-definition forms' Software → Version dropdowns): a
+  `$derived.by(...)` recomputes the dependent option list from the
+  parent selection (e.g. `selectedSoftwareType` picks which of
+  `data.javaVersions`/`paperVersions`/`fabricVersions`/`forgeVersions` is
+  currently in scope), paired with a `$effect` that resets the dependent
+  bound value to the new list's first entry (or `''` if empty) whenever
+  the parent selection changes — so a stale selection from the previous
+  list is never silently submitted. Reuse this `$derived.by` + resetting
+  `$effect` shape for any future "picking A filters the options for B"
+  dropdown pair rather than inventing a new reactivity pattern.
 
 ## Typography & assets
 

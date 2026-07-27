@@ -7,6 +7,195 @@ documentation — see `README.md` for that, `CLAUDE.md` for architecture,
 
 ---
 
+## 2026-07-27 — Paper/Fabric/Forge server software provisioning
+
+### What we finished
+
+- Extended provisioning (previously vanilla-only) to Java's three most
+  common server softwares. Researched live against the real
+  infrastructure before writing any code: `fill.papermc.io` (Paper),
+  `meta.fabricmc.net` (Fabric loader + installer), and
+  `files.minecraftforge.net/.../promotions_slim.json` + Forge's maven
+  layout (Forge) — including a real constructed Forge installer URL that
+  returned a genuine ~6MB jar during planning.
+- **Paper** needed zero Pulse changes — its API returns a direct
+  server-jar URL, structurally identical to vanilla's Mojang manifest
+  resolution.
+- **Fabric and Forge** both needed a genuinely new mechanic: download an
+  *installer* program (not a runnable server), then run it before
+  anything is launchable. `provision.RunInstaller` (split into a pure,
+  unit-tested `installerArgs()` and a thin `exec.Command` wrapper) runs
+  under a new `"installing_loader"` progress phase, between the existing
+  `"downloading"` and `"configuring"` phases of the async
+  `create_instance` job. `Configure()` now branches its launch command on
+  `SoftwareType`, not just `GamePlatform`: Fabric launches the fixed
+  `fabric-server-launch.jar` the installer produces; Forge invokes its own
+  generated `run.sh`/`run.bat` directly rather than reconstructing its
+  internal (version-era-variable) args-file invocation.
+- `versionCatalogEntries`/`serverDefinitions` gained `softwareType`/
+  `loaderVersion` columns; the cache key became
+  `` `${gamePlatform}:${softwareType}:${version}` ``. Fixed a real bug
+  caught during development: the cache's `replaceEntries` originally
+  filtered only on `gamePlatform`, so refreshing vanilla's catalog would
+  have silently wiped Paper/Fabric/Forge's cached entries too.
+- Panel UI: a Software dropdown (Vanilla/Paper/Fabric/Forge) on both the
+  create-server page and the Settings server-definitions form, each
+  driving the Version dropdown via a cascading-select pattern (see
+  STYLE.md) — the backend already supported non-vanilla software from the
+  wire-payload work, this closed the last "no way to actually pick it"
+  gap.
+- Verified: `go build/vet/test` (incl. cross-compiles), `svelte-check`,
+  both `ADAPTER` builds clean; new Go tests for `Configure()`'s per-
+  software-type command construction and `installerArgs()` (pure logic,
+  no Java needed); a sandboxed dry run confirmed all three resolvers
+  return real live data and that a `create_instance` payload queued
+  through the actual UI (Fabric) and a saved definition (Forge) both
+  carry the correct `software_type`/`loader_version`/`download_url`.
+
+### Key technical decisions (with why)
+
+- **The installer *execution* step itself is unverified against a real
+  Java environment** — this whole feature was built in a sandbox with no
+  Java runtime at all. Every resolver was live-verified against the real
+  internet; the exact CLI flags `installerArgs` passes to Fabric's and
+  Forge's installer jars are reasoned from each project's current public
+  documentation, not from a real invocation. Same treatment as
+  self-update's Windows swap path and Tauri's Rust code — flagged
+  explicitly in CLAUDE.md, not silently assumed correct.
+- **Forge's launch command invokes its own generated `run.sh`/`run.bat`
+  rather than reconstructing the internal `@user_jvm_args.txt`/
+  `@libraries/.../*_args.txt` invocation** — that internal path has
+  genuinely varied across Forge/MC version eras; the run script already
+  encodes whatever that specific installer run produced, so Pulse never
+  needs to know Forge's internal file-naming convention at all.
+- **A cache table's read/write/delete queries must filter on every
+  dimension of its own key, not just some of them** — the
+  `replaceEntries` bug above, now called out generally in CLAUDE.md's
+  "Coding conventions" so it's not re-learned the hard way on the next
+  multi-dimensional cache table.
+
+### Next 2–3 logical steps
+
+1. **Verify Fabric and Forge server creation against a real Java
+   environment** — the one explicitly-flagged, un-glossed-over gap left
+   by this feature. Needs a real host with Java installed; confirm the
+   installer actually runs to completion and the resulting server
+   actually starts under the constructed launch command.
+2. **Compile the Tauri desktop shell** on a machine with the Rust
+   toolchain — still unverified by compiling since it was reworked as a
+   thin client (see the entry below).
+3. **Run a real restore against nimo's actual backups** — still
+   deliberately left to the user to trigger first (destructive even with
+   the safety-backup net), noted as a known gap since the backups
+   feature landed.
+
+---
+
+## 2026-07-27 — Reusable server definitions (templates)
+
+### What we finished
+
+- `serverDefinitions` — a saved preset (name, edition, version, download
+  URL, Java major version) an admin creates once on `/settings` and
+  reuses from any agent's create-server page instead of re-picking a
+  version every time. Global, not per-agent, since a definition describes
+  *what* to install, not *where*.
+- **Pinned at creation time, not a live reference**: saving a definition
+  resolves a concrete version/download URL/Java major version right then
+  (the same `versionCatalogEntries` resolution the create-server form
+  already used) and stores it permanently — using the definition later
+  never re-resolves the catalog. Extracted the shared resolution logic
+  (`resolveVersionSelection`) once rather than duplicating it between the
+  create-server action and the new create-definition action.
+- Zero wire/Pulse changes — picking a definition just changes which
+  Panel-side code path resolves the `create_instance` payload's
+  version/URL fields; the command Pulse receives is identical either way.
+- `go build/vet/test`, `svelte-check`, both `ADAPTER` builds clean.
+
+### Key technical decisions (with why)
+
+- **No `ConfirmModal` on delete** — matches the existing convention that
+  only genuinely high-blast-radius actions (restore, recursive file
+  delete, delete-instance) get that treatment; deleting a template has
+  zero effect on any running server.
+
+---
+
+## 2026-07-27 — Node detail: host stats and allowlisted diagnostics
+
+### What we finished
+
+- Host stats (CPU/RAM/disk/uptime) on the agent-detail page. CPU/RAM were
+  already flowing through the heartbeat but never displayed here (a pure
+  display gap); disk usage was already on the wire but silently dropped
+  by the heartbeat route; host uptime didn't exist at all
+  (`gopsutil/v3/host.Uptime()`, distinct from a Minecraft instance's own
+  uptime).
+- `run_diagnostic` — a new host-level command, unrelated to
+  `console_command`'s RCON round-trip into the Minecraft process itself.
+  `pulse/internal/diagnostics` holds a fixed, hand-maintained allowlist
+  per OS (four friendly names: uptime/disk_usage/memory/processes) —
+  deliberately not arbitrary command execution; extra admin-supplied
+  arguments are appended to the fixed base command via a real argv slice,
+  never a shell string.
+- Real bug caught by this feature: `export const` from a
+  `+page.server.ts` file that isn't a recognized page export
+  (`load`/`actions`) passes `svelte-check` but fails the actual
+  `pnpm run build` — reconfirmed why this project always checks both
+  `ADAPTER` builds, not just `svelte-check`.
+- `go build/vet/test`, `svelte-check`, both `ADAPTER` builds clean.
+
+### Key technical decisions (with why)
+
+- **Same fixed 4-name allowlist offered regardless of the target agent's
+  OS** — Panel trusts Pulse to map each name correctly for its own
+  platform, same "Panel stays dumb" split already established for
+  Java-runtime package names.
+
+---
+
+## 2026-07-27 — Whitelist/op/ban forms, CI/CD for Pulse releases, Tauri rework
+
+### What we finished
+
+- **Whitelist/op/ban moderation forms** (instance page's "Player
+  Management" card): purpose-built forms that construct the equivalent
+  RCON command string and queue it through the exact same
+  `console_command` pipe the raw console already uses — no new wire type,
+  no new Go code, since the game doesn't care whether the text came from
+  a button or typing. Same transcript as the raw console.
+- **CI/CD for Pulse releases**
+  (`.github/workflows/release.yml`): a tag-triggered workflow
+  cross-compiles, signs (reusing self-update's Ed25519 signing key), and
+  publishes a GitHub Release with all three binaries plus a manifest CSV.
+  Automates build+sign only, not hosting/publishing to Panel — the admin
+  still pastes the download URL/signature into `/settings` by hand, a
+  deliberate scope boundary. **Made the repo public** (`codenexus/axon`,
+  still AGPL-3.0) so Pulse's unauthenticated self-update downloader can
+  fetch release assets without carrying a GitHub token as a new
+  credential type.
+- **Tauri desktop shell reworked as a thin client**: the original
+  scaffolded plan (spawn `node build/index.js` as a local sidecar)
+  assumed Panel only exists while the desktop app is open — doesn't fit
+  wanting one Panel reachable from multiple networks over time. Reworked
+  to remember an already-running Panel's URL and point a native webview
+  at it, same as opening it in a browser — no local backend, no local DB.
+  **Not yet verified by compiling** — no Rust toolchain in this
+  environment.
+
+### Key technical decisions (with why)
+
+- **No new validation beyond a whitespace check on usernames** for the
+  moderation forms — a malformed multi-arg command would otherwise go out
+  silently, but no other game-side acceptance check is possible or
+  attempted, matching the raw console's own passthrough philosophy.
+- **CI/CD stops at build+sign, deliberately** — auto-publishing straight
+  to Panel would need a new authenticated Panel API endpoint, a shared
+  secret, and Panel reachable from GitHub Actions; real new architecture
+  for a step that already takes 30 seconds by hand.
+
+---
+
 ## 2026-07-27 — Deleting a Panel-created instance
 
 ### What we finished
