@@ -562,6 +562,37 @@ See `PROJECT_LOG.md`'s 2026-07-26 entry for how the swap/rollback/rejection
 paths were verified live (a throwaway Ed25519 keypair, never the real
 pinned key).
 
+### CI/CD for Pulse releases
+
+`.github/workflows/release.yml`, triggered by pushing a version tag
+(`git tag vX.Y.Z && git push --tags`, or manually via
+`workflow_dispatch`): runs `go vet`/`go test`, cross-compiles the same
+three `make build-pulse-linux/windows/darwin` targets used for manual
+builds (`PULSE_VERSION := $(shell git describe ...)` resolves to the
+clean tag name at an exact tag ref), signs each binary with the
+`AXON_SIGNING_KEY` repo secret (the same Ed25519 key generated for
+self-update — never printed, referenced only as an env var passed
+straight into `go run ./tools/sign`), and creates a GitHub Release with
+all three binaries plus a `dist-manifest.csv` (platform, filename,
+sha256, signature_hex per binary) attached.
+
+**Automates build+sign, not hosting or publishing to Panel** — a
+deliberate scope boundary, not a gap: the admin still copies the release
+asset's download URL and the matching signature from the manifest CSV
+into Panel's `/settings` publish form. Auto-publishing would need a new
+authenticated Panel API endpoint, a shared secret, and Panel being
+reachable from GitHub Actions — real new architecture for a step that
+already takes 30 seconds.
+
+**The repo is now public** (`codenexus/axon`) — this is *why* self-update
+downloads work at all here: Pulse's downloader
+(`downloadHTTPClient.Get()` in `updater.go`) is a plain unauthenticated
+HTTP GET, and a private repo's release assets aren't fetchable without a
+token. Rather than teach Pulse to carry a GitHub token (a new credential
+type for one narrow use), the repo went public instead — the LICENSE
+(AGPL-3.0) was already there and already recognized by GitHub, so this
+wasn't blocked on anything real.
+
 ### Deploying Pulse to a real host — first install is still manual
 
 Self-update only covers updating an *already-enrolled* Pulse. First
@@ -803,14 +834,18 @@ see `PROJECT_LOG.md` for session-by-session detail on each:
   config and a create-server flow; a "Publish Pulse release" form +
   "→ vNEW available" note for self-update. `svelte-check` clean; both
   `ADAPTER=node` and `ADAPTER=cloudflare` builds pass.
-- Repo pushed to `codenexus/axon` (private), `main` branch.
+- Repo pushed to `codenexus/axon` (**public**, AGPL-3.0), `main` branch. A
+  tag-triggered CI/CD pipeline (`.github/workflows/release.yml`)
+  cross-compiles, signs, and publishes a GitHub Release for Pulse — see
+  "CI/CD for Pulse releases" above.
 
 Deliberately deferred — don't assume half-built unless you find code for it:
 
 - Multi-user auth/RBAC, mDNS/Bonjour discovery, Tauri sidecar process
-  spawning, and a "Systems"-style multi-node overview page. No CI/CD or
-  automated build/sign/publish pipeline for Pulse releases — self-update
-  automates the *swap*, not the build.
+  spawning, and a "Systems"-style multi-node overview page. CI auto-
+  publishing a release straight to Panel (today the admin still pastes
+  the download URL/signature into `/settings` — see "CI/CD for Pulse
+  releases" above for why that's a deliberate boundary, not a gap).
 - Reusable server "definitions"/templates — server creation is direct
   one-shot "create this specific server now," not a saved-template
   system. Per-host RAM-based Java heap sizing (fixed
