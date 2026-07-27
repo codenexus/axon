@@ -97,7 +97,7 @@ type HeartbeatRequest struct {
 // the command it names.
 type CommandProgress struct {
 	CommandID string `json:"command_id"`
-	Phase     string `json:"phase"` // "preparing" | "installing_java" | "downloading" | "configuring" | "registering"
+	Phase     string `json:"phase"` // "preparing" | "installing_java" | "downloading" | "installing_loader" | "configuring" | "registering"
 }
 
 type CommandResult struct {
@@ -158,12 +158,17 @@ type CreateInstanceCommandPayload struct {
 	Name         string `json:"name"`
 	GamePlatform string `json:"game_platform"` // "java" | "bedrock"
 	Version      string `json:"version"`
-	SoftwareType string `json:"software_type"` // "vanilla" for v1
+	SoftwareType string `json:"software_type"` // "vanilla" | "paper" | "fabric" | "forge" (java); "vanilla" (bedrock)
 	DownloadURL  string `json:"download_url"`
 	// JavaMajorVersion is 0/omitted for bedrock — no JVM involved.
-	JavaMajorVersion int    `json:"java_major_version,omitempty"`
-	Port             int    `json:"port"`
-	WorkingDir       string `json:"working_dir"`
+	JavaMajorVersion int `json:"java_major_version,omitempty"`
+	// LoaderVersion is the Fabric loader version (independent of the
+	// Minecraft version) — only set when SoftwareType is "fabric", empty
+	// otherwise. Forge's installer needs no such argument (its version is
+	// already baked into the installer jar's own download URL).
+	LoaderVersion string `json:"loader_version,omitempty"`
+	Port          int    `json:"port"`
+	WorkingDir    string `json:"working_dir"`
 }
 
 // ConsoleCommandPayload is the Payload shape for "console_command" — an

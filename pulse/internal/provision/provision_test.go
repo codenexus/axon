@@ -21,7 +21,7 @@ func TestDownloadJava(t *testing.T) {
 	defer server.Close()
 
 	dir := t.TempDir()
-	dest, err := Download(server.URL, dir, "java")
+	dest, err := Download(server.URL, dir, "java", "vanilla")
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestDownloadBedrockExtractsAndSetsExecBit(t *testing.T) {
 	defer server.Close()
 
 	dir := t.TempDir()
-	dest, err := Download(server.URL, dir, "bedrock")
+	dest, err := Download(server.URL, dir, "bedrock", "vanilla")
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
@@ -112,6 +112,7 @@ func TestConfigureJava(t *testing.T) {
 	dir := t.TempDir()
 	payload := protocol.CreateInstanceCommandPayload{
 		GamePlatform: "java",
+		SoftwareType: "vanilla",
 		Port:         25566,
 		WorkingDir:   dir,
 	}
@@ -133,6 +134,126 @@ func TestConfigureJava(t *testing.T) {
 	props, err := os.ReadFile(filepath.Join(dir, "server.properties"))
 	if err != nil || string(props) != "server-port=25566\n" {
 		t.Fatalf("server.properties = %q, %v", props, err)
+	}
+}
+
+func TestConfigurePaperMatchesVanillaShape(t *testing.T) {
+	dir := t.TempDir()
+	payload := protocol.CreateInstanceCommandPayload{
+		GamePlatform: "java",
+		SoftwareType: "paper",
+		Port:         25567,
+		WorkingDir:   dir,
+	}
+	command, env, err := Configure(payload, "/usr/bin/java")
+	if err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	want := []string{"/usr/bin/java", "-Xmx2048M", "-jar", "server.jar", "nogui"}
+	if len(command) != len(want) {
+		t.Fatalf("command = %v, want %v", command, want)
+	}
+	for i := range want {
+		if command[i] != want[i] {
+			t.Fatalf("command = %v, want %v", command, want)
+		}
+	}
+	if env != nil {
+		t.Fatalf("expected no extra env for paper, got %v", env)
+	}
+}
+
+func TestConfigureFabricLaunchesGeneratedJar(t *testing.T) {
+	dir := t.TempDir()
+	payload := protocol.CreateInstanceCommandPayload{
+		GamePlatform: "java",
+		SoftwareType: "fabric",
+		Port:         25568,
+		WorkingDir:   dir,
+	}
+	command, _, err := Configure(payload, "/usr/bin/java")
+	if err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	want := []string{"/usr/bin/java", "-Xmx2048M", "-jar", "fabric-server-launch.jar", "nogui"}
+	if len(command) != len(want) {
+		t.Fatalf("command = %v, want %v", command, want)
+	}
+	for i := range want {
+		if command[i] != want[i] {
+			t.Fatalf("command = %v, want %v", command, want)
+		}
+	}
+}
+
+func TestConfigureForgeInvokesGeneratedRunScript(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("this assertion targets the non-Windows run.sh path")
+	}
+	dir := t.TempDir()
+	payload := protocol.CreateInstanceCommandPayload{
+		GamePlatform: "java",
+		SoftwareType: "forge",
+		Port:         25569,
+		WorkingDir:   dir,
+	}
+	command, _, err := Configure(payload, "/usr/bin/java")
+	if err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	want := []string{"sh", "run.sh", "nogui"}
+	if len(command) != len(want) {
+		t.Fatalf("command = %v, want %v", command, want)
+	}
+	for i := range want {
+		if command[i] != want[i] {
+			t.Fatalf("command = %v, want %v", command, want)
+		}
+	}
+}
+
+func TestConfigureUnsupportedSoftwareTypeFails(t *testing.T) {
+	dir := t.TempDir()
+	payload := protocol.CreateInstanceCommandPayload{
+		GamePlatform: "java",
+		SoftwareType: "bogus-loader",
+		Port:         25570,
+		WorkingDir:   dir,
+	}
+	if _, _, err := Configure(payload, "/usr/bin/java"); err == nil {
+		t.Fatal("expected an error for an unsupported software_type")
+	}
+}
+
+func TestInstallerArgsFabric(t *testing.T) {
+	args, err := installerArgs("fabric", "/work/dir", "1.21.1", "0.19.3")
+	if err != nil {
+		t.Fatalf("installerArgs: %v", err)
+	}
+	want := []string{"server", "-mcversion", "1.21.1", "-loader", "0.19.3", "-downloadMinecraft", "-dir", "/work/dir"}
+	if len(args) != len(want) {
+		t.Fatalf("args = %v, want %v", args, want)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("args = %v, want %v", args, want)
+		}
+	}
+}
+
+func TestInstallerArgsForge(t *testing.T) {
+	args, err := installerArgs("forge", "/work/dir", "1.21", "")
+	if err != nil {
+		t.Fatalf("installerArgs: %v", err)
+	}
+	if len(args) != 1 || args[0] != "--installServer" {
+		t.Fatalf("args = %v, want [--installServer]", args)
+	}
+}
+
+func TestInstallerArgsRejectsNonInstallerSoftwareType(t *testing.T) {
+	if _, err := installerArgs("vanilla", "/work/dir", "1.21.1", ""); err == nil {
+		t.Fatal("expected an error for a software type that doesn't use an installer")
 	}
 }
 

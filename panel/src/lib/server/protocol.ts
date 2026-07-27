@@ -97,10 +97,14 @@ export interface CreateInstanceCommandPayload {
 	name: string;
 	game_platform: string;
 	version: string;
-	software_type: string;
+	software_type: string; // "vanilla" | "paper" | "fabric" | "forge" (java); "vanilla" (bedrock)
 	download_url: string;
 	// Omitted for bedrock — no JVM involved.
 	java_major_version?: number;
+	// Fabric loader version (independent of the Minecraft version) — only
+	// set when software_type is "fabric". Forge needs no such argument
+	// (its version is baked into the installer jar's own download URL).
+	loader_version?: string;
 	port: number;
 	working_dir: string;
 }

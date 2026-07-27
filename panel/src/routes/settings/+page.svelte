@@ -10,8 +10,27 @@
 	}
 
 	let definitionEdition = $state<'java' | 'bedrock'>('java');
+	let definitionSoftwareType = $state<'vanilla' | 'paper' | 'fabric' | 'forge'>('vanilla');
 	let definitionCatalogId = $state('');
 	let definitionBedrockUrl = $state('');
+
+	const definitionJavaVersions = $derived.by(() => {
+		switch (definitionSoftwareType) {
+			case 'paper':
+				return data.paperVersions;
+			case 'fabric':
+				return data.fabricVersions;
+			case 'forge':
+				return data.forgeVersions;
+			default:
+				return data.javaVersions;
+		}
+	});
+
+	$effect(() => {
+		definitionSoftwareType;
+		definitionCatalogId = definitionJavaVersions[0]?.id ?? '';
+	});
 
 	let bedrockPrefilled = $state(false);
 	$effect(() => {
@@ -147,9 +166,18 @@
 			</label>
 			{#if definitionEdition === 'java'}
 				<label>
+					Software
+					<select name="software_type" bind:value={definitionSoftwareType}>
+						<option value="vanilla">Vanilla</option>
+						<option value="paper">Paper</option>
+						<option value="fabric">Fabric</option>
+						<option value="forge">Forge</option>
+					</select>
+				</label>
+				<label>
 					Version
 					<select name="catalog_id" bind:value={definitionCatalogId}>
-						{#each data.javaVersions as opt (opt.id)}
+						{#each definitionJavaVersions as opt (opt.id)}
 							<option value={opt.id}>{opt.version} (Java {opt.javaMajorVersion})</option>
 						{/each}
 					</select>
@@ -191,6 +219,7 @@
 					<tr>
 						<th>Name</th>
 						<th>Edition</th>
+						<th>Software</th>
 						<th>Version</th>
 						<th></th>
 					</tr>
@@ -200,6 +229,7 @@
 						<tr>
 							<td>{def.name}</td>
 							<td>{def.gamePlatform}</td>
+							<td>{def.softwareType}</td>
 							<td>{def.version}</td>
 							<td>
 								<form method="POST" action="?/deleteDefinition" use:enhance>

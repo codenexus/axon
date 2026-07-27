@@ -279,25 +279,70 @@ else gets a `delete_backup` command queued exactly like the manual Delete
 button. Exported separately from the due-check so the instance page's
 **Apply Retention Now** button can call it alone.
 
-### Provisioning new servers (Java + Bedrock vanilla)
+### Provisioning new servers (Java: vanilla/Paper/Fabric/Forge; Bedrock: vanilla)
 
 Lets an admin create a real, running server from Panel — deliberately
-narrow scope (vanilla only, latest ~3 versions per edition, Linux-only
-Java auto-install, fixed Java heap, one shared port range); see
-"Deliberately deferred" below for the exact cuts.
+narrow scope (latest ~3 versions per edition/software, Linux-only Java
+auto-install, fixed Java heap, one shared port range); see "Deliberately
+deferred" below for the exact cuts.
 
 **Version/download-URL resolution lives in Panel, not Pulse**
 (`panel/src/lib/server/versionCatalog.ts`) — plain outbound `fetch()`
-calls, works identically on Node and Cloudflare Workers. Java resolves via
-Mojang's public `version_manifest_v2.json` (per-version JSON has both the
-download URL and required Java major version, no hardcoded mapping table
-needed). Bedrock has no equivalent API — Panel's best-effort scrape of
-minecraft.net's download page is confirmed unreliable in practice
-(bot-detection/JS rendering), so a scrape failure yields a stale cached
-result rather than an error, and the create-server form always shows an
-admin-editable download-URL field for Bedrock. Pulse itself does zero
-version-catalog resolution — it receives a fully-resolved `create_instance`
-payload and just acts on it.
+calls, works identically on Node and Cloudflare Workers. Java vanilla
+resolves via Mojang's public `version_manifest_v2.json` (per-version JSON
+has both the download URL and required Java major version, no hardcoded
+mapping table needed). Bedrock has no equivalent API — Panel's best-effort
+scrape of minecraft.net's download page is confirmed unreliable in
+practice (bot-detection/JS rendering), so a scrape failure yields a stale
+cached result rather than an error, and the create-server form always
+shows an admin-editable download-URL field for Bedrock. Pulse itself does
+zero version-catalog resolution — it receives a fully-resolved
+`create_instance` payload and just acts on it.
+
+**`versionCatalogEntries` is keyed by `` `${gamePlatform}:${softwareType}:${version}` ``,**
+not just `${gamePlatform}:${version}` — a single MC version now has up to
+four distinct cached entries (vanilla/paper/fabric/forge), each with its
+own download URL, so every cache read/write
+(`freshEntries`/`staleEntries`/`replaceEntries`) filters on **both**
+`gamePlatform` and `softwareType`. Filtering on `gamePlatform` alone was
+a real bug caught during this feature's development — resolving a fresh
+vanilla catalog would have wiped Paper/Fabric/Forge's cached entries too,
+and vice versa.
+
+**Paper, Fabric, and Forge — one resolver each, all live-verified against
+the real APIs during development** (not just documentation):
+- **Paper** (`resolvePaperVersions`) is structurally identical to
+  vanilla — `fill.papermc.io`'s API returns a direct downloadable server
+  jar URL, so **Pulse needs zero changes at all** to run one; it's just
+  another `server.jar`. Paper's own version list is queried rather than
+  assumed identical to vanilla's latest-3 (Paper sometimes lags a fresh MC
+  release); per candidate version, the newest `channel: "STABLE"` build's
+  `downloads["server:default"].url` is taken.
+- **Fabric** (`resolveFabricVersions`) resolves the installer jar once
+  from `meta.fabricmc.net/v2/versions/installer` (first `stable: true`
+  entry — installer version is MC-version-independent) and, per candidate
+  MC version, the loader version from
+  `meta.fabricmc.net/v2/versions/loader/{v}` (first `stable: true`
+  entry). The *installer* URL is stored as `downloadUrl`; the resolved
+  loader version goes in a new nullable `loaderVersion` column (Fabric is
+  the only software type that needs it — the loader version is
+  independent of the MC version and doesn't fit any existing field).
+- **Forge** (`resolveForgeVersions`) fetches
+  `files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json`
+  once, and per candidate MC version looks up `"{v}-recommended"`
+  (falling back to `"{v}-latest"`), constructing the installer URL
+  deterministically from Forge's own maven layout:
+  `https://maven.minecraftforge.net/net/minecraftforge/forge/{v}-{forgeVersion}/forge-{v}-{forgeVersion}-installer.jar`
+  — verified live during development (a real ~6MB jar came back at that
+  exact constructed URL).
+
+All three reuse `latestVanillaMcVersions()` (a thin wrapper over the
+vanilla Java resolver) for "which MC versions are current" — one source
+of truth, not three independently-derived lists. `resolveVersionSelection`
+takes a `softwareType` parameter now and returns `loaderVersion` alongside
+the existing fields; `CreateInstanceCommandPayload` (both `types.go` and
+`protocol.ts`) gained a matching `LoaderVersion`/`loader_version` field,
+empty except for Fabric.
 
 **Java runtime handling is auto-install, Linux-only**
 (`pulse/internal/javaruntime/`): detects an existing match first, installs
@@ -310,15 +355,55 @@ rather than attempting anything unsafe.
 
 **Provisioning mechanics** (`pulse/internal/provision/`, deliberately
 separate from `internal/backup`, which only ever archives/restores an
-*existing* instance): downloads the URL (Java → `server.jar` directly;
-Bedrock → a zip, with the same zip-slip defensive check `backup/engine.go`'s
-tar extraction has — genuinely load-bearing here since the archive comes
-from a remote third party, plus an explicit `chmod 0o755` on
-`bedrock_server` since zip entries don't reliably carry the exec bit),
-writes `eula.txt` (Java) and patches `server-port` into
-`server.properties` via `mcserver.WriteProperty`. Bedrock's launch needs
-`LD_LIBRARY_PATH=.` — a new `Env []string` field on
-`mcserver.InstanceConfig`.
+*existing* instance): downloads the URL (Java vanilla/Paper → `server.jar`
+directly; Java Fabric/Forge → `installer.jar`, since the download there is
+an installer *program*, not a runnable server — see below; Bedrock → a
+zip, with the same zip-slip defensive check `backup/engine.go`'s tar
+extraction has — genuinely load-bearing here since the archive comes from
+a remote third party, plus an explicit `chmod 0o755` on `bedrock_server`
+since zip entries don't reliably carry the exec bit), writes `eula.txt`
+(Java) and patches `server-port` into `server.properties` via
+`mcserver.WriteProperty`. Bedrock's launch needs `LD_LIBRARY_PATH=.` — a
+new `Env []string` field on `mcserver.InstanceConfig`.
+
+**Fabric/Forge need an installer run before anything is launchable** —
+the one genuinely new mechanic Paper didn't need (Paper's jar runs exactly
+like vanilla's). `provision.RunInstaller(softwareType, workingDir,
+javaBin, mcVersion, loaderVersion)` invokes the downloaded
+`installer.jar`, split into a pure `installerArgs(...)` (unit-tested, no
+Java needed) and a thin `exec.Command` wrapper (not meaningfully testable
+without a real installer):
+- **Fabric**: `java -jar installer.jar server -mcversion {mcVersion}
+  -loader {loaderVersion} -downloadMinecraft -dir {workingDir}` —
+  `-downloadMinecraft` has the installer fetch the vanilla jar itself too,
+  so Pulse needs no separate Mojang download step. Produces a fixed,
+  predictable `fabric-server-launch.jar` regardless of MC version.
+- **Forge**: `java -jar installer.jar --installServer` (cwd =
+  `workingDir`). Produces `run.sh`/`run.bat` plus a per-version
+  `user_jvm_args.txt`/`libraries/.../*_args.txt` — deliberately **not**
+  parsed or reconstructed by Pulse (that internal path has genuinely
+  varied across Forge/MC version eras); `Configure()` just invokes the
+  generated `run.sh` (Unix) / `run.bat` (Windows) directly instead,
+  sidestepping needing to know Forge's internal file-naming convention at
+  all.
+
+`create_instance.go` calls `RunInstaller` after `Download()` and before
+`Configure()`, under a new `"installing_loader"` progress phase, only when
+`SoftwareType` is `fabric`/`forge`. `provision.Configure()` branches its
+launch-command construction on `SoftwareType` (not just `GamePlatform`):
+vanilla/Paper unchanged (`java -jar server.jar nogui`), Fabric launches
+`fabric-server-launch.jar`, Forge invokes the generated run script.
+
+**Explicit, un-glossed-over verification gap**: this was all written and
+developed in an environment with **no Java runtime at all**. Every
+resolver above was live-verified against the real Paper/Fabric/Forge
+infrastructure (including a real constructed Forge installer URL
+returning a genuine ~6MB jar), but the installer **execution** step
+itself — the exact CLI flags `installerArgs` passes — is reasoned through
+from each project's current public documentation, not from a real
+invocation. Treat this the same as self-update's Windows swap path and
+Tauri's Rust code: verify Fabric and Forge server creation against a real
+Java environment before trusting it on a real host.
 
 **Dynamic instance registration** (`Manager.AddInstance` +
 `config_persist.go`'s `SaveConfig`): the instance list was previously
@@ -330,13 +415,15 @@ the disk write fails, so memory and disk can never diverge.
 **Async command execution — the one exception to `execute()`'s
 contract**: every other command type is a single blocking call returning
 a terminal `CommandResult` within one heartbeat cycle. `create_instance`
-can't (Java install, jar/zip download can take minutes). `runLoop`
-(`pulse/cmd/pulse/main.go`) intercepts it *before* `execute()`'s switch
-and runs it in a goroutine (`creationJob`,
-`pulse/cmd/pulse/create_instance.go`, tracked in an `activeJobs` map),
-reporting a coarse phase via `HeartbeatRequest.InProgressCommands` until
-it finishes. No other command type needs this — don't reach for it unless
-something is genuinely multi-cycle.
+can't (Java install, jar/zip download, and now a Fabric/Forge installer
+run, can all take minutes). `runLoop` (`pulse/cmd/pulse/main.go`)
+intercepts it *before* `execute()`'s switch and runs it in a goroutine
+(`creationJob`, `pulse/cmd/pulse/create_instance.go`, tracked in an
+`activeJobs` map), reporting a coarse phase via
+`HeartbeatRequest.InProgressCommands`
+(`"preparing" | "installing_java" | "downloading" | "installing_loader" | "configuring" | "registering"`)
+until it finishes. No other command type needs this — don't reach for it
+unless something is genuinely multi-cycle.
 
 **Port + working-dir placement**: Panel auto-assigns both from an
 admin-configured `portRangeStart`/`portRangeEnd`/`instancesRootDir` (set
@@ -917,10 +1004,14 @@ see `PROJECT_LOG.md` for session-by-session detail on each:
 - **Pulse**: enrollment; heartbeat; start/stop/restart; RCON graceful
   stop; PID-file process reconciliation; full backup lifecycle
   (create/list/delete/download/restore/schedule/retention); provisioning
-  new Java/Bedrock vanilla servers; deleting a provisioned instance; a raw
-  RCON console; a raw `server.properties` read/write pair; file
-  management (list/upload/delete); self-update (Ed25519-signed atomic
-  binary swap with grace-period confirm/rollback); allowlisted host
+  new Java (vanilla/Paper/Fabric/Forge) and Bedrock (vanilla) servers,
+  including running Fabric/Forge's installer program
+  (`pulse/internal/provision`'s `RunInstaller` — **installer execution
+  itself unverified, no Java runtime in the environment this was built
+  in**, see "Provisioning new servers" above); deleting a provisioned
+  instance; a raw RCON console; a raw `server.properties` read/write
+  pair; file management (list/upload/delete); self-update (Ed25519-signed
+  atomic binary swap with grace-period confirm/rollback); allowlisted host
   diagnostic commands (`pulse/internal/diagnostics`). `go build/vet/test`
   clean, including Windows/macOS cross-compiles.
 - **Panel**: single-admin auth; enrollment token generation; dashboard
@@ -930,10 +1021,12 @@ see `PROJECT_LOG.md` for session-by-session detail on each:
   transcript, whitelist/op/ban moderation forms, a properties editor, and
   a "Danger Zone" delete card; a file browser; a themed confirm modal; 3
   theme palettes; an agent detail page with port-range/instances-dir
-  config, a create-server flow (with reusable saved server definitions),
-  host stats (CPU/RAM/disk/uptime), and an allowlisted diagnostic-command
-  runner; a "Publish Pulse release" form + "→ vNEW available" note for
-  self-update. `svelte-check` clean; both
+  config, a create-server flow (Java software choice of
+  vanilla/Paper/Fabric/Forge, Bedrock vanilla-only, with reusable saved
+  server definitions pinning the same choice), host stats
+  (CPU/RAM/disk/uptime), and an allowlisted diagnostic-command runner; a
+  "Publish Pulse release" form + "→ vNEW available" note for self-update.
+  `svelte-check` clean; both
   `ADAPTER=node` and `ADAPTER=cloudflare` builds pass. A Tauri desktop
   thin client (`panel/src-tauri/`) exists as code but is **not yet
   verified by compiling** — no Rust toolchain in the environment it was
@@ -959,9 +1052,13 @@ Deliberately deferred — don't assume half-built unless you find code for it:
   `provision.DefaultJavaHeapMB` constant) or any UI control for it — a
   server definition can't capture this either, since there's no admin
   input for it anywhere yet. Split port ranges per edition (one shared
-  range per agent covers both). Paper/Forge/Fabric/etc. server software
-  (vanilla only) and anything beyond the latest ~3 versions per edition.
-  Editing an existing server definition (delete and recreate instead).
+  range per agent covers both). Any software beyond Paper/Fabric/Forge
+  (e.g. Sponge, Quilt) and anything beyond the latest ~3 versions per
+  edition/software. Editing an existing server definition (delete and
+  recreate instead). Mod/plugin management (installing actual mods/
+  plugins onto a provisioned server) — this feature is server-*software*
+  provisioning only, same as vanilla only ever installed the bare server.
+  A Bedrock loader equivalent — Bedrock has no comparable ecosystem.
 
 See `PROJECT_LOG.md` for session-by-session history and next steps, and
 `STYLE.md` for UI/UX conventions.

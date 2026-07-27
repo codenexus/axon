@@ -130,11 +130,15 @@ export const backupSchedules = sqliteTable('backup_schedules', {
 // in-memory cache across requests) and to keep the create-server page fast
 // without hitting either external source on every load.
 export const versionCatalogEntries = sqliteTable('version_catalog_entries', {
-	id: text('id').primaryKey(), // `${gamePlatform}:${version}`
+	id: text('id').primaryKey(), // `${gamePlatform}:${softwareType}:${version}`
 	gamePlatform: text('game_platform').notNull(), // "java" | "bedrock"
+	softwareType: text('software_type').notNull(), // "vanilla" | "paper" | "fabric" | "forge"
 	version: text('version').notNull(),
 	downloadUrl: text('download_url').notNull(),
 	javaMajorVersion: integer('java_major_version'), // null for bedrock
+	// Fabric's loader version is independent of the Minecraft version and
+	// doesn't fit any other field — null for every other software type.
+	loaderVersion: text('loader_version'),
 	sortOrder: integer('sort_order').notNull(), // 0 = newest, for dropdown ordering
 	fetchedAt: integer('fetched_at').notNull(),
 	expiresAt: integer('expires_at').notNull()
@@ -150,9 +154,11 @@ export const serverDefinitions = sqliteTable('server_definitions', {
 	id: text('id').primaryKey(), // def_<random>
 	name: text('name').notNull(),
 	gamePlatform: text('game_platform').notNull(), // "java" | "bedrock"
+	softwareType: text('software_type').notNull(), // "vanilla" | "paper" | "fabric" | "forge"
 	version: text('version').notNull(),
 	downloadUrl: text('download_url').notNull(),
 	javaMajorVersion: integer('java_major_version'), // null for bedrock
+	loaderVersion: text('loader_version'), // fabric only
 	createdAt: integer('created_at').notNull()
 });
 

@@ -7,8 +7,30 @@
 	let { data, form }: { data: PageData; form: ActionData } = $props();
 
 	let selectedEdition = $state<'java' | 'bedrock'>('java');
+	let selectedSoftwareType = $state<'vanilla' | 'paper' | 'fabric' | 'forge'>('vanilla');
 	let selectedCatalogId = $state('');
 	let bedrockUrlOverride = $state('');
+
+	const javaVersionsBySoftware = $derived.by(() => {
+		switch (selectedSoftwareType) {
+			case 'paper':
+				return data.paperVersions;
+			case 'fabric':
+				return data.fabricVersions;
+			case 'forge':
+				return data.forgeVersions;
+			default:
+				return data.javaVersions;
+		}
+	});
+
+	// Switching software type invalidates any catalog id picked from the
+	// previous list — reset to whatever the newly-selected list's first
+	// entry is (or empty, if it's not loaded yet).
+	$effect(() => {
+		selectedSoftwareType;
+		selectedCatalogId = javaVersionsBySoftware[0]?.id ?? '';
+	});
 
 	let selectedDefinitionId = $state('');
 	const usingDefinition = $derived(selectedDefinitionId !== '');
@@ -28,6 +50,7 @@
 		preparing: 'Preparing…',
 		installing_java: 'Installing Java…',
 		downloading: 'Downloading server software…',
+		installing_loader: 'Running installer…',
 		configuring: 'Configuring…',
 		registering: 'Registering with Pulse…'
 	};
@@ -101,7 +124,10 @@
 
 				{#if usingDefinition}
 					<input type="hidden" name="definition_id" value={selectedDefinitionId} />
-					<p class="meta">Will create: {selectedDefinition?.gamePlatform} · {selectedDefinition?.version}</p>
+					<p class="meta">
+						Will create: {selectedDefinition?.gamePlatform} · {selectedDefinition?.softwareType} ·
+						{selectedDefinition?.version}
+					</p>
 				{:else}
 					<label>
 						Edition
@@ -113,15 +139,24 @@
 
 					{#if selectedEdition === 'java'}
 						<label>
+							Software
+							<select name="software_type" bind:value={selectedSoftwareType}>
+								<option value="vanilla">Vanilla</option>
+								<option value="paper">Paper</option>
+								<option value="fabric">Fabric</option>
+								<option value="forge">Forge</option>
+							</select>
+						</label>
+						<label>
 							Version
 							<select name="catalog_id" bind:value={selectedCatalogId}>
-								{#each data.javaVersions as opt (opt.id)}
+								{#each javaVersionsBySoftware as opt (opt.id)}
 									<option value={opt.id}>{opt.version} (Java {opt.javaMajorVersion})</option>
 								{/each}
 							</select>
 						</label>
-						{#if data.javaVersions.length === 0}
-							<p class="error">No Java versions available right now — try again shortly.</p>
+						{#if javaVersionsBySoftware.length === 0}
+							<p class="error">No versions available right now for this software — try again shortly.</p>
 						{/if}
 					{:else}
 						<label>

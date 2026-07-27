@@ -3,7 +3,14 @@ import { desc, eq } from 'drizzle-orm';
 import type { Actions, PageServerLoad } from './$types';
 import { enrollmentTokens, pulseReleases, serverDefinitions } from '$lib/server/db/schema';
 import { randomToken, sha256Hex } from '$lib/server/tokens';
-import { resolveBedrockVersions, resolveJavaVersions, resolveVersionSelection } from '$lib/server/versionCatalog';
+import {
+	resolveBedrockVersions,
+	resolveFabricVersions,
+	resolveForgeVersions,
+	resolveJavaVersions,
+	resolvePaperVersions,
+	resolveVersionSelection
+} from '$lib/server/versionCatalog';
 
 const ENROLLMENT_TOKEN_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
@@ -15,11 +22,14 @@ const SIGNATURE_HEX_LENGTH = 128;
 export const load: PageServerLoad = async ({ locals }) => {
 	const releases = await locals.db.select().from(pulseReleases).orderBy(desc(pulseReleases.createdAt));
 	const definitions = await locals.db.select().from(serverDefinitions).orderBy(desc(serverDefinitions.createdAt));
-	const [javaVersions, bedrockVersions] = await Promise.all([
+	const [javaVersions, paperVersions, fabricVersions, forgeVersions, bedrockVersions] = await Promise.all([
 		resolveJavaVersions(locals.db),
+		resolvePaperVersions(locals.db),
+		resolveFabricVersions(locals.db),
+		resolveForgeVersions(locals.db),
 		resolveBedrockVersions(locals.db)
 	]);
-	return { releases, definitions, javaVersions, bedrockVersions };
+	return { releases, definitions, javaVersions, paperVersions, fabricVersions, forgeVersions, bedrockVersions };
 };
 
 export const actions: Actions = {
@@ -81,17 +91,21 @@ export const actions: Actions = {
 		if (gamePlatform !== 'java' && gamePlatform !== 'bedrock') {
 			return fail(400, { error: 'select a valid edition' });
 		}
+		// Bedrock has no loader ecosystem — always vanilla, no selector.
+		const softwareType = gamePlatform === 'java' ? String(data.get('software_type') ?? 'vanilla') : 'vanilla';
 
-		const resolved = await resolveVersionSelection(locals.db, gamePlatform, catalogId, bedrockUrlOverride);
+		const resolved = await resolveVersionSelection(locals.db, gamePlatform, softwareType, catalogId, bedrockUrlOverride);
 		if ('error' in resolved) return fail(400, { error: resolved.error });
 
 		await locals.db.insert(serverDefinitions).values({
 			id: `def_${randomToken(8)}`,
 			name,
 			gamePlatform,
+			softwareType,
 			version: resolved.version,
 			downloadUrl: resolved.downloadUrl,
 			javaMajorVersion: resolved.javaMajorVersion ?? null,
+			loaderVersion: resolved.loaderVersion ?? null,
 			createdAt: Date.now()
 		});
 

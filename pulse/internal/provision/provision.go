@@ -13,7 +13,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -28,11 +30,14 @@ import (
 var downloadHTTPClient = &http.Client{}
 
 // Download fetches url into workingDir. For "java" it's saved directly as
-// server.jar. For "bedrock" it's downloaded to a temp file and extracted in
-// place as a zip (the official Bedrock Dedicated Server distribution
-// shape), with the bedrock_server binary's executable bit set explicitly
-// afterward — zip entries don't reliably carry it across platforms.
-func Download(url, workingDir, gamePlatform string) (destPath string, err error) {
+// server.jar — except "fabric"/"forge", where the download is actually an
+// *installer* program (not a runnable server), saved as installer.jar and
+// run via RunInstaller below before anything is launchable. For "bedrock"
+// it's downloaded to a temp file and extracted in place as a zip (the
+// official Bedrock Dedicated Server distribution shape), with the
+// bedrock_server binary's executable bit set explicitly afterward — zip
+// entries don't reliably carry it across platforms.
+func Download(url, workingDir, gamePlatform, softwareType string) (destPath string, err error) {
 	if err := os.MkdirAll(workingDir, 0o755); err != nil {
 		return "", fmt.Errorf("create working dir: %w", err)
 	}
@@ -48,17 +53,21 @@ func Download(url, workingDir, gamePlatform string) (destPath string, err error)
 
 	switch gamePlatform {
 	case "java":
-		dest := filepath.Join(workingDir, "server.jar")
+		filename := "server.jar"
+		if softwareType == "fabric" || softwareType == "forge" {
+			filename = "installer.jar"
+		}
+		dest := filepath.Join(workingDir, filename)
 		f, err := os.Create(dest)
 		if err != nil {
-			return "", fmt.Errorf("create server.jar: %w", err)
+			return "", fmt.Errorf("create %s: %w", filename, err)
 		}
 		if _, err := io.Copy(f, resp.Body); err != nil {
 			f.Close()
-			return "", fmt.Errorf("write server.jar: %w", err)
+			return "", fmt.Errorf("write %s: %w", filename, err)
 		}
 		if err := f.Close(); err != nil {
-			return "", fmt.Errorf("close server.jar: %w", err)
+			return "", fmt.Errorf("close %s: %w", filename, err)
 		}
 		return dest, nil
 
@@ -161,6 +170,66 @@ func withinRoot(absPath, root string) bool {
 	return absPath == root || strings.HasPrefix(absPath, root+string(filepath.Separator))
 }
 
+// installerArgs builds the argv RunInstaller passes to the installer jar
+// (after "java", "-jar", "<path-to-installer.jar>") for a given software
+// type — kept as a pure function, separate from actually invoking it, so
+// this can be unit-tested without a real installer or a JVM.
+//
+// NOT verified against a real installer run — the environment this was
+// written in has no Java runtime at all. These flags are based on each
+// project's current public documentation/CLI help, not a live invocation.
+// Treat this the same as self-update's Windows swap path: reasoned
+// through, not execution-tested — verify on a real machine before relying
+// on it against a real host.
+func installerArgs(softwareType, workingDir, mcVersion, loaderVersion string) ([]string, error) {
+	switch softwareType {
+	case "fabric":
+		// -downloadMinecraft has the installer fetch the vanilla server
+		// jar itself too, so Pulse needs no separate Mojang download step
+		// for Fabric. Produces a fixed, predictable fabric-server-launch.jar
+		// regardless of MC version.
+		return []string{
+			"server",
+			"-mcversion", mcVersion,
+			"-loader", loaderVersion,
+			"-downloadMinecraft",
+			"-dir", workingDir,
+		}, nil
+
+	case "forge":
+		// Produces run.sh/run.bat (+ user_jvm_args.txt + a per-version
+		// libraries/.../*_args.txt) in workingDir — deliberately not
+		// parsed or reconstructed here; Configure() below just invokes
+		// the generated run script directly instead of trying to
+		// reconstruct Forge's internal args-file path, which has varied
+		// across Minecraft/Forge version eras.
+		return []string{"--installServer"}, nil
+
+	default:
+		return nil, fmt.Errorf("software type %q does not use an installer", softwareType)
+	}
+}
+
+// RunInstaller runs a previously-downloaded installer.jar (see Download)
+// to completion, producing whatever launch target Configure() will use
+// (fabric-server-launch.jar, or a run.sh/run.bat for Forge). See
+// installerArgs' doc comment for the real, stated verification gap here.
+func RunInstaller(softwareType, workingDir, javaBin, mcVersion, loaderVersion string) error {
+	args, err := installerArgs(softwareType, workingDir, mcVersion, loaderVersion)
+	if err != nil {
+		return err
+	}
+
+	installerPath := filepath.Join(workingDir, "installer.jar")
+	cmd := exec.Command(javaBin, append([]string{"-jar", installerPath}, args...)...)
+	cmd.Dir = workingDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("run %s installer: %w (output: %s)", softwareType, err, output)
+	}
+	return nil
+}
+
 // DefaultJavaHeapMB is the fixed -Xmx applied to every newly-provisioned
 // Java instance in v1 — no per-host RAM-based sizing or UI control yet.
 // The admin can hand-edit the instance's launch command afterward for a
@@ -183,8 +252,36 @@ func Configure(payload protocol.CreateInstanceCommandPayload, javaBin string) (c
 		if err := os.WriteFile(eulaPath, []byte("eula=true\n"), 0o644); err != nil {
 			return nil, nil, fmt.Errorf("write eula.txt: %w", err)
 		}
-		command := []string{javaBin, fmt.Sprintf("-Xmx%dM", DefaultJavaHeapMB), "-jar", "server.jar", "nogui"}
-		return command, nil, nil
+		heapFlag := fmt.Sprintf("-Xmx%dM", DefaultJavaHeapMB)
+
+		switch payload.SoftwareType {
+		case "vanilla", "paper":
+			// Paper's server jar is a drop-in replacement for vanilla's —
+			// same "java -jar server.jar" launch shape, no provisioning
+			// difference at all beyond which URL Download() fetched.
+			return []string{javaBin, heapFlag, "-jar", "server.jar", "nogui"}, nil, nil
+
+		case "fabric":
+			// fabric-server-launch.jar is a fixed filename RunInstaller's
+			// Fabric installer run always produces, regardless of MC
+			// version.
+			return []string{javaBin, heapFlag, "-jar", "fabric-server-launch.jar", "nogui"}, nil, nil
+
+		case "forge":
+			// Deliberately invoke Forge's own generated run script rather
+			// than reconstructing its internal @user_jvm_args.txt/
+			// @libraries/.../*_args.txt invocation ourselves — that
+			// internal path has varied across Forge/MC version eras, the
+			// run script already encodes whatever this specific version's
+			// installer produced.
+			if runtime.GOOS == "windows" {
+				return []string{"run.bat", "nogui"}, nil, nil
+			}
+			return []string{"sh", "run.sh", "nogui"}, nil, nil
+
+		default:
+			return nil, nil, fmt.Errorf("unsupported software_type %q for java", payload.SoftwareType)
+		}
 
 	case "bedrock":
 		// bedrock_server needs to find its bundled .so files, which aren't

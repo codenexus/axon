@@ -4,7 +4,14 @@ import type { Actions, PageServerLoad } from './$types';
 import { commands, pulseAgents, serverDefinitions } from '$lib/server/db/schema';
 import { newInstanceId, queueCommand } from '$lib/server/commands';
 import { allocatePort } from '$lib/server/portAllocator';
-import { resolveBedrockVersions, resolveJavaVersions, resolveVersionSelection } from '$lib/server/versionCatalog';
+import {
+	resolveBedrockVersions,
+	resolveFabricVersions,
+	resolveForgeVersions,
+	resolveJavaVersions,
+	resolvePaperVersions,
+	resolveVersionSelection
+} from '$lib/server/versionCatalog';
 import type { CreateInstanceCommandPayload } from '$lib/server/protocol';
 
 export const load: PageServerLoad = async ({ params, url, locals }) => {
@@ -44,15 +51,38 @@ export const load: PageServerLoad = async ({ params, url, locals }) => {
 	const definitions = await locals.db.select().from(serverDefinitions).orderBy(desc(serverDefinitions.createdAt));
 
 	if (!configured) {
-		return { agent, configured, javaVersions: [], bedrockVersions: [], definitions, pendingCommand };
+		return {
+			agent,
+			configured,
+			javaVersions: [],
+			paperVersions: [],
+			fabricVersions: [],
+			forgeVersions: [],
+			bedrockVersions: [],
+			definitions,
+			pendingCommand
+		};
 	}
 
-	const [javaVersions, bedrockVersions] = await Promise.all([
+	const [javaVersions, paperVersions, fabricVersions, forgeVersions, bedrockVersions] = await Promise.all([
 		resolveJavaVersions(locals.db),
+		resolvePaperVersions(locals.db),
+		resolveFabricVersions(locals.db),
+		resolveForgeVersions(locals.db),
 		resolveBedrockVersions(locals.db)
 	]);
 
-	return { agent, configured, javaVersions, bedrockVersions, definitions, pendingCommand };
+	return {
+		agent,
+		configured,
+		javaVersions,
+		paperVersions,
+		fabricVersions,
+		forgeVersions,
+		bedrockVersions,
+		definitions,
+		pendingCommand
+	};
 };
 
 export const actions: Actions = {
@@ -73,6 +103,8 @@ export const actions: Actions = {
 		let version: string;
 		let downloadUrl: string;
 		let javaMajorVersion: number | undefined;
+		let softwareType: string;
+		let loaderVersion: string | undefined;
 
 		if (definitionId) {
 			// Pinned at the definition's own creation time — skip catalog
@@ -87,20 +119,25 @@ export const actions: Actions = {
 			version = definition.version;
 			downloadUrl = definition.downloadUrl;
 			javaMajorVersion = definition.javaMajorVersion ?? undefined;
+			softwareType = definition.softwareType;
+			loaderVersion = definition.loaderVersion ?? undefined;
 		} else {
 			gamePlatform = String(form.get('game_platform') ?? '');
 			if (gamePlatform !== 'java' && gamePlatform !== 'bedrock') {
 				return fail(400, { error: 'invalid edition' });
 			}
+			// Bedrock has no loader ecosystem — always vanilla, no selector.
+			softwareType = gamePlatform === 'java' ? String(form.get('software_type') ?? 'vanilla') : 'vanilla';
 
 			const catalogId = String(form.get('catalog_id') ?? '');
 			const bedrockUrlOverride = String(form.get('download_url') ?? '').trim();
-			const resolved = await resolveVersionSelection(locals.db, gamePlatform, catalogId, bedrockUrlOverride);
+			const resolved = await resolveVersionSelection(locals.db, gamePlatform, softwareType, catalogId, bedrockUrlOverride);
 			if ('error' in resolved) return fail(400, { error: resolved.error });
 
 			version = resolved.version;
 			downloadUrl = resolved.downloadUrl;
 			javaMajorVersion = resolved.javaMajorVersion;
+			loaderVersion = resolved.loaderVersion;
 		}
 
 		const port = await allocatePort(locals.db, agent.id);
@@ -115,9 +152,10 @@ export const actions: Actions = {
 			name,
 			game_platform: gamePlatform,
 			version,
-			software_type: 'vanilla',
+			software_type: softwareType,
 			download_url: downloadUrl,
 			java_major_version: javaMajorVersion,
+			loader_version: loaderVersion,
 			port,
 			working_dir: workingDir
 		};

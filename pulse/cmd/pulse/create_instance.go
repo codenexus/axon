@@ -78,9 +78,21 @@ func runCreateInstanceJob(job *creationJob, manager *mcserver.Manager, configPat
 	}
 
 	job.setPhase("downloading")
-	if _, err := provision.Download(payload.DownloadURL, payload.WorkingDir, payload.GamePlatform); err != nil {
+	if _, err := provision.Download(payload.DownloadURL, payload.WorkingDir, payload.GamePlatform, payload.SoftwareType); err != nil {
 		job.finish(protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: err.Error()})
 		return
+	}
+
+	// Fabric/Forge downloaded an *installer*, not a runnable server —
+	// run it now to produce the actual launch target (fabric-server-
+	// launch.jar, or Forge's run.sh/run.bat) before Configure() below
+	// builds the launch command around it.
+	if payload.SoftwareType == "fabric" || payload.SoftwareType == "forge" {
+		job.setPhase("installing_loader")
+		if err := provision.RunInstaller(payload.SoftwareType, payload.WorkingDir, javaBin, payload.Version, payload.LoaderVersion); err != nil {
+			job.finish(protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: err.Error()})
+			return
+		}
 	}
 
 	job.setPhase("configuring")
