@@ -734,19 +734,39 @@ See `PROJECT_LOG.md`'s 2026-07-26 entry for how the swap/rollback/rejection
 paths were verified live (a throwaway Ed25519 keypair, never the real
 pinned key).
 
-### CI/CD for Pulse releases
+### CI/CD for Pulse releases (+ a Windows Tauri desktop build)
 
 `.github/workflows/release.yml`, triggered by pushing a version tag
 (`git tag vX.Y.Z && git push --tags`, or manually via
-`workflow_dispatch`): runs `go vet`/`go test`, cross-compiles the same
-three `make build-pulse-linux/windows/darwin` targets used for manual
-builds (`PULSE_VERSION := $(shell git describe ...)` resolves to the
-clean tag name at an exact tag ref), signs each binary with the
-`AXON_SIGNING_KEY` repo secret (the same Ed25519 key generated for
-self-update — never printed, referenced only as an env var passed
-straight into `go run ./tools/sign`), and creates a GitHub Release with
-all three binaries plus a `dist-manifest.csv` (platform, filename,
-sha256, signature_hex per binary) attached.
+`workflow_dispatch`), has two jobs against the same tag:
+
+- **`release`** (the original job): runs `go vet`/`go test`,
+  cross-compiles the same three `make build-pulse-linux/windows/darwin`
+  targets used for manual builds (`PULSE_VERSION := $(shell git describe
+  ...)` resolves to the clean tag name at an exact tag ref), signs each
+  binary with the `AXON_SIGNING_KEY` repo secret (the same Ed25519 key
+  generated for self-update — never printed, referenced only as an env
+  var passed straight into `go run ./tools/sign`), and creates the
+  GitHub Release with all three binaries plus a `dist-manifest.csv`
+  (platform, filename, sha256, signature_hex per binary) attached.
+- **`build-desktop-windows`** (`needs: release`, so it appends to the
+  release the first job already created rather than racing it): builds
+  the Tauri desktop shell (`panel/src-tauri/`) natively on a
+  `windows-latest` runner — Tauri apps aren't meaningfully
+  cross-compilable for Windows from the Linux boxes this project
+  otherwise develops on, unlike Pulse's plain `GOOS=windows` Go
+  cross-compile. Same `pnpm`/Node setup as `ci.yml`
+  (`pnpm/action-setup` + `actions/setup-node` with the `packageManager`-
+  pinned pnpm version), plus `dtolnay/rust-toolchain` for Rust (not
+  preinstalled on the hosted runner) and `Swatinem/rust-cache` scoped to
+  `panel/src-tauri` for build speed. Runs `pnpm run tauri:build`
+  (`tauri.conf.json`'s `bundle.targets: "all"` produces both an MSI and
+  an NSIS `.exe` installer on Windows) and uploads both to the same
+  release tag via `gh release upload --clobber`. **Unsigned** — no
+  Windows code-signing certificate configured, so SmartScreen will warn
+  on first run; acceptable for now (single-admin self-hosted tool,
+  installing your own build), revisit if this ever needs to look
+  trustworthy to a wider audience.
 
 **Automates build+sign, not hosting or publishing to Panel** — a
 deliberate scope boundary, not a gap: the admin still copies the release
@@ -754,7 +774,10 @@ asset's download URL and the matching signature from the manifest CSV
 into Panel's `/settings` publish form. Auto-publishing would need a new
 authenticated Panel API endpoint, a shared secret, and Panel being
 reachable from GitHub Actions — real new architecture for a step that
-already takes 30 seconds.
+already takes 30 seconds. (This boundary only applies to Pulse's
+self-update wiring — the desktop shell has no self-update mechanism at
+all; a new build is just a new release asset the admin downloads and
+reinstalls by hand.)
 
 **The repo is now public** (`codenexus/axon`) — this is *why* self-update
 downloads work at all here: Pulse's downloader
@@ -1055,8 +1078,9 @@ see `PROJECT_LOG.md` for session-by-session detail on each:
   fix this took.
 - Repo pushed to `codenexus/axon` (**public**, AGPL-3.0), `main` branch. A
   tag-triggered CI/CD pipeline (`.github/workflows/release.yml`)
-  cross-compiles, signs, and publishes a GitHub Release for Pulse — see
-  "CI/CD for Pulse releases" above.
+  cross-compiles, signs, and publishes a GitHub Release for Pulse, plus a
+  second job that builds an (unsigned) Windows Tauri desktop installer
+  onto the same release — see "CI/CD for Pulse releases" above.
 
 Deliberately deferred — don't assume half-built unless you find code for it:
 

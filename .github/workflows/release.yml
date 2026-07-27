@@ -54,3 +54,45 @@ jobs:
             dist-manifest.csv \
             --title "${{ github.ref_name }}" \
             --generate-notes
+
+  build-desktop-windows:
+    needs: release # append to the release the `release` job just created
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: panel/src-tauri
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: panel/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: panel/pnpm-lock.yaml
+
+      - name: Install frontend deps
+        run: cd panel && pnpm install --frozen-lockfile
+
+      # Unsigned build: no Windows code-signing cert configured yet, so
+      # SmartScreen will warn on first run. Fine for now (self-hosted OSS,
+      # single admin installing their own build) -- revisit if this needs
+      # to look trustworthy to a wider audience.
+      - name: Build Tauri app for Windows
+        run: cd panel && pnpm run tauri:build
+
+      - name: Upload to release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.ref_name }}" \
+            panel/src-tauri/target/release/bundle/msi/*.msi \
+            panel/src-tauri/target/release/bundle/nsis/*.exe \
+            --clobber
