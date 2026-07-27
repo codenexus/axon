@@ -9,12 +9,13 @@ export const load: PageServerLoad = async ({ locals }) => {
 };
 
 export const actions: Actions = {
-	default: async ({ request, locals, cookies }) => {
+	default: async ({ request, locals, cookies, url }) => {
 		const form = await request.formData();
 		const password = String(form.get('password') ?? '');
 		if (password.length < 8) {
 			return fail(400, { error: 'Password must be at least 8 characters.' });
 		}
+		const secure = url.protocol === 'https:';
 
 		const firstRun = !(await hasAdmin(locals.db));
 		if (firstRun) {
@@ -22,7 +23,7 @@ export const actions: Actions = {
 				passwordHash: await hashPassword(password),
 				createdAt: Date.now()
 			});
-			await createSession(locals.db, cookies);
+			await createSession(locals.db, cookies, secure);
 			throw redirect(303, '/');
 		}
 
@@ -30,7 +31,7 @@ export const actions: Actions = {
 		if (!admin || !(await verifyPassword(password, admin.passwordHash))) {
 			return fail(400, { error: 'Incorrect password.' });
 		}
-		await createSession(locals.db, cookies);
+		await createSession(locals.db, cookies, secure);
 		throw redirect(303, '/');
 	}
 };

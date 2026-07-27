@@ -1,6 +1,5 @@
 import type { Cookies } from '@sveltejs/kit';
 import { eq } from 'drizzle-orm';
-import { dev } from '$app/environment';
 import type { Db } from './db';
 import { adminSessions, adminSettings } from './db/schema';
 import { randomToken, sha256Hex } from './tokens';
@@ -8,7 +7,7 @@ import { randomToken, sha256Hex } from './tokens';
 export const SESSION_COOKIE = 'axon_session';
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-export async function createSession(db: Db, cookies: Cookies): Promise<void> {
+export async function createSession(db: Db, cookies: Cookies, secure: boolean): Promise<void> {
 	const token = randomToken();
 	const now = Date.now();
 	await db.insert(adminSessions).values({
@@ -20,8 +19,14 @@ export async function createSession(db: Db, cookies: Cookies): Promise<void> {
 		path: '/',
 		httpOnly: true,
 		// Home-lab/LAN deployments over plain http need the cookie to still
-		// be set; only require `secure` once we know we're not in dev.
-		secure: !dev,
+		// be sent back by the browser — `secure` must reflect the actual
+		// request protocol (from `url`, which respects adapter-node's ORIGIN
+		// override), not just "is this a production build". A browser will
+		// silently accept but never resend a `Secure` cookie over plain
+		// http, causing a login->redirect->login loop that only stayed
+		// hidden because every prior test ran against `localhost`, which
+		// Chrome/Firefox special-case as a secure context even over http.
+		secure,
 		sameSite: 'lax',
 		maxAge: SESSION_TTL_MS / 1000
 	});
