@@ -125,6 +125,37 @@ func (m *Manager) AddInstance(cfg InstanceConfig, configPath, backupsDir string)
 	return nil
 }
 
+// RemoveInstance is the inverse of AddInstance: it stops tracking id and
+// rewrites configPath to no longer include it, in the same critical
+// section (rolling back the in-memory removal if SaveConfig fails, same
+// as AddInstance's rollback-on-failure). It does not touch the instance's
+// working_dir — callers decide if/when to delete files (see
+// executeDeleteInstance in pulse/cmd/pulse/main.go).
+func (m *Manager) RemoveInstance(id, configPath, backupsDir string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	removed, exists := m.instances[id]
+	if !exists {
+		return fmt.Errorf("unknown instance %q", id)
+	}
+	delete(m.instances, id)
+
+	configs := make([]InstanceConfig, 0, len(m.instances))
+	for _, inst := range m.instances {
+		inst.mu.Lock()
+		configs = append(configs, inst.cfg)
+		inst.mu.Unlock()
+	}
+	sort.Slice(configs, func(i, j int) bool { return configs[i].ID < configs[j].ID })
+
+	if err := SaveConfig(configPath, configs, backupsDir); err != nil {
+		m.instances[id] = removed
+		return fmt.Errorf("persist instance config: %w", err)
+	}
+	return nil
+}
+
 func (m *Manager) Start(id string) error {
 	m.mu.RLock()
 	inst, ok := m.instances[id]

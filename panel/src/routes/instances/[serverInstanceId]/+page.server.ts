@@ -1,4 +1,4 @@
-import { error, fail } from '@sveltejs/kit';
+import { error, fail, redirect } from '@sveltejs/kit';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import type { Actions, PageServerLoad } from './$types';
 import { backupDownloads, backups, backupSchedules, commands, pulseAgents, serverInstances } from '$lib/server/db/schema';
@@ -377,5 +377,26 @@ export const actions: Actions = {
 		});
 
 		return { ok: true };
+	},
+
+	deleteInstance: async ({ params, locals }) => {
+		const [instance] = await locals.db
+			.select()
+			.from(serverInstances)
+			.where(eq(serverInstances.id, params.serverInstanceId));
+		if (!instance) return fail(404, { error: 'instance not found' });
+
+		await queueCommand(locals.db, {
+			pulseAgentId: instance.pulseAgentId,
+			instanceId: instance.instanceId,
+			type: 'delete_instance'
+		});
+
+		// The delete only completes asynchronously (Pulse reports it on a
+		// later heartbeat) — redirect back to the dashboard immediately
+		// rather than staying on a page whose own row is about to vanish.
+		// The dashboard's existing poll + "Deleting…" badge (see
+		// pendingActions) carries the rest of the story.
+		throw redirect(303, '/');
 	}
 };

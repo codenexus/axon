@@ -120,7 +120,7 @@ type CommandResult struct {
 
 type Command struct {
 	ID   string `json:"id"`
-	Type string `json:"type"` // "start_instance" | "stop_instance" | "restart_instance" | "backup_instance" | "restore_backup" | "delete_backup" | "push_backup" | "create_instance" | "console_command" | "read_properties" | "write_properties" | "list_files" | "upload_file" | "delete_file"
+	Type string `json:"type"` // "start_instance" | "stop_instance" | "restart_instance" | "backup_instance" | "restore_backup" | "delete_backup" | "push_backup" | "create_instance" | "delete_instance" | "console_command" | "read_properties" | "write_properties" | "list_files" | "upload_file" | "delete_file"
 	// InstanceID is the id of an existing instance the command targets, for
 	// every type except create_instance — there, Panel pregenerates the id
 	// of the instance being created (which doesn't exist yet), following

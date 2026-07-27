@@ -56,7 +56,8 @@
 	const pendingActionLabel: Record<string, string> = {
 		starting: 'Starting…',
 		stopping: 'Stopping…',
-		restarting: 'Restarting…'
+		restarting: 'Restarting…',
+		deleting: 'Deleting…'
 	};
 
 	const stateLabel: Record<string, string> = {

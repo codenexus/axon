@@ -1,7 +1,7 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import type { Db } from './db';
 import { effectiveInterval } from '../heartbeat';
-import { backupDownloads, backups, commands, pulseAgents } from './db/schema';
+import { backupDownloads, backups, backupSchedules, commands, pulseAgents, serverInstances } from './db/schema';
 import type { BackupCommandPayload, RestoreCommandPayload } from './protocol';
 import { randomToken } from './tokens';
 
@@ -14,6 +14,7 @@ export type CommandType =
 	| 'delete_backup'
 	| 'push_backup'
 	| 'create_instance'
+	| 'delete_instance'
 	| 'console_command'
 	| 'read_properties'
 	| 'write_properties'
@@ -94,6 +95,26 @@ export async function resolveCommandOutcome(
 		// pre-inserted (unlike backups' pregenerated-row pattern) — Panel
 		// had no honest running_state/etc. to give it before Pulse ever
 		// confirmed the instance exists.
+		return;
+	}
+
+	if (cmd.type === 'delete_instance') {
+		if (!outcome.success) return; // stays around so the admin can retry
+
+		// Cascade-delete Panel's own metadata for the now-gone instance.
+		// Deliberately NOT cascaded: backupDownloads (keyed by backupId,
+		// already self-expiring via pruneExpiredDownloads' TTL sweep once
+		// its parent backups row is gone), fileUploads and commands history
+		// for this (pulseAgentId, instanceId) pair (same reasoning — inert,
+		// never queried unscoped, and the instance's own page is gone so
+		// nothing surfaces them again). Backup archives on Pulse's disk are
+		// never deleted by this — only Panel's metadata about them; they
+		// live in the shared backups_dir, not under working_dir, and Pulse
+		// never touches them as part of delete_instance.
+		const serverInstanceId = `${cmd.pulseAgentId}:${cmd.instanceId}`;
+		await db.delete(backupSchedules).where(eq(backupSchedules.serverInstanceId, serverInstanceId));
+		await db.delete(backups).where(eq(backups.serverInstanceId, serverInstanceId));
+		await db.delete(serverInstances).where(eq(serverInstances.id, serverInstanceId));
 		return;
 	}
 

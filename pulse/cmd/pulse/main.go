@@ -148,6 +148,14 @@ func runLoop(client *protocol.Client, cred *credential.Credential, manager *mcse
 				activeJobs[cmd.ID] = startCreateInstanceJob(manager, configPath, backupsDir, cmd)
 				continue
 			}
+			if cmd.Type == "delete_instance" {
+				// Needs configPath/backupsDir, which execute()'s switch
+				// doesn't receive — intercepted here for the same reason
+				// create_instance is, rather than threading two more params
+				// through execute()'s signature for one command type.
+				pendingResults = append(pendingResults, executeDeleteInstance(manager, configPath, backupsDir, cmd))
+				continue
+			}
 			pendingResults = append(pendingResults, execute(client, cred, manager, backupEngine, cmd))
 		}
 
@@ -260,6 +268,44 @@ func executeRestart(manager *mcserver.Manager, cmd protocol.Command) protocol.Co
 		log.Printf("command %s (%s) failed: %v", cmd.ID, cmd.Type, err)
 		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: err.Error()}
 	}
+	return protocol.CommandResult{CommandID: cmd.ID, Success: true}
+}
+
+// executeDeleteInstance is the inverse of create_instance: stop (if
+// running) -> remove from Pulse's tracking (RemoveInstance) -> delete
+// working_dir. Backup archives already taken for this instance are NOT
+// touched here — they live in the shared backups_dir, not under
+// working_dir — only Panel's metadata about them is cleaned up, on the
+// Panel side, once this command reports success.
+func executeDeleteInstance(manager *mcserver.Manager, configPath, backupsDir string, cmd protocol.Command) protocol.CommandResult {
+	cfg, ok := manager.InstanceConfig(cmd.InstanceID)
+	if !ok {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "unknown instance " + cmd.InstanceID}
+	}
+
+	if manager.IsRunning(cmd.InstanceID) {
+		if err := manager.Stop(cmd.InstanceID); err != nil {
+			return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "stop before delete: " + err.Error()}
+		}
+		if err := manager.WaitStopped(cmd.InstanceID, stopWaitTimeout); err != nil {
+			return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "waiting for stop before delete: " + err.Error()}
+		}
+	}
+
+	if err := manager.RemoveInstance(cmd.InstanceID, configPath, backupsDir); err != nil {
+		log.Printf("command %s (%s) failed: %v", cmd.ID, cmd.Type, err)
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: err.Error()}
+	}
+
+	if err := os.RemoveAll(cfg.WorkingDir); err != nil {
+		// Tracking is already gone (the part Panel needs to hear "success"
+		// for) — report the leftover directory so the admin knows to clean
+		// it up by hand, without contradicting the overall success.
+		msg := "instance removed but failed to delete working_dir: " + err.Error()
+		log.Printf("command %s (%s): %s", cmd.ID, cmd.Type, msg)
+		return protocol.CommandResult{CommandID: cmd.ID, Success: true, Message: msg}
+	}
+
 	return protocol.CommandResult{CommandID: cmd.ID, Success: true}
 }
 

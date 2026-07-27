@@ -14,6 +14,13 @@
 	let confirmingRestoreId = $state<string | null>(null);
 	let restoreForms: Record<string, HTMLFormElement> = {};
 
+	// Delete-instance confirmation: same trigger-button + hidden-form +
+	// ConfirmModal pattern as restore above and file/folder delete
+	// (files/+page.svelte) — only one instance to delete on this page, so
+	// no per-id map is needed.
+	let confirmingDeleteInstance = $state(false);
+	let deleteInstanceForm: HTMLFormElement;
+
 	function isInFlight(backup: (typeof data.backups)[number]): boolean {
 		return backup.status === 'pending' || backup.status === 'running' || !!backup.pendingOperation;
 	}
@@ -427,6 +434,21 @@
 			</ul>
 		{/if}
 	</section>
+
+	<section class="card danger-zone">
+		<h2>Danger Zone</h2>
+		<p class="meta">
+			Stops the server and permanently deletes it from this Pulse agent, including its entire working
+			directory (world, plugins/mods, configs — everything). Backup archives already taken for this
+			instance are <strong>not</strong> deleted and remain on the Pulse host's disk, but Panel's record of
+			them (this page's backups list and schedule) is removed along with the instance.
+		</p>
+		<form method="POST" action="?/deleteInstance" use:enhance bind:this={deleteInstanceForm}>
+			<button type="button" class="ghost" onclick={() => (confirmingDeleteInstance = true)}>
+				Delete this server
+			</button>
+		</form>
+	</section>
 </div>
 
 <ConfirmModal
@@ -441,6 +463,19 @@
 		if (id) restoreForms[id]?.requestSubmit();
 	}}
 	onCancel={() => (confirmingRestoreId = null)}
+/>
+
+<ConfirmModal
+	open={confirmingDeleteInstance}
+	title="Delete this server?"
+	message="This cannot be undone. The server will be stopped and its entire working directory deleted."
+	confirmLabel="Delete"
+	danger
+	onConfirm={() => {
+		confirmingDeleteInstance = false;
+		deleteInstanceForm?.requestSubmit();
+	}}
+	onCancel={() => (confirmingDeleteInstance = false)}
 />
 
 <style>
@@ -483,6 +518,15 @@
 		border-radius: 0.75rem;
 		padding: 1.25rem;
 		margin-bottom: 1.25rem;
+	}
+
+	.danger-zone {
+		border-color: var(--axon-status-error);
+	}
+
+	.danger-zone h2 {
+		margin-top: 0;
+		color: var(--axon-status-error);
 	}
 
 	.section-header {

@@ -453,6 +453,57 @@ could otherwise allocate the same port before the first one's instance
 ever showed up in `server_instances`. See "Known gaps" for the allocator's
 one real limitation (blind to legacy hand-configured instances).
 
+### Deleting a provisioned instance
+
+The inverse of "Provisioning new servers" above — `delete_instance`, a
+synchronous command like `start_instance`/`stop_instance` (no payload,
+acts on `cmd.InstanceID` alone), added once the create-only asymmetry
+became a real gap (there was no way to remove a misconfigured or unwanted
+Panel-created instance short of hand-editing `pulse.instances.json` and
+`working_dir` over SSH).
+
+**Pulse**: `Manager.RemoveInstance(id, configPath, backupsDir string)
+error` (`pulse/internal/mcserver/manager.go`) is the literal inverse of
+`AddInstance` — same critical section, same rebuild-the-full-list-then-
+`SaveConfig` shape, same rollback-in-memory-if-the-write-fails guarantee.
+`executeDeleteInstance` (`pulse/cmd/pulse/main.go`) orchestrates: stop the
+instance if running (reusing `gracefulStop` via `Stop`/`WaitStopped`, same
+as `executeRestart`/`executeBackup`) → `RemoveInstance` → `os.RemoveAll`
+the entire `working_dir`. Like `create_instance`, this needs
+`configPath`/`backupsDir` that `execute()`'s switch doesn't receive —
+rather than threading two more params through that signature for one
+command type, `runLoop` intercepts `delete_instance` the same way it
+already intercepts `create_instance`, before the switch. **Backup archives
+already taken for this instance are never touched** — they live in the
+shared `backups_dir`, not under `working_dir`, so deleting the instance
+doesn't delete its backups' bytes on Pulse's disk, only Panel's records of
+them (below).
+
+**Panel**: cascade-delete on success, in `resolveCommandOutcome`
+(`panel/src/lib/server/commands.ts`) — once `delete_instance` reports
+success, the `serverInstances` row, its `backups` rows, and its
+`backupSchedules` row are all deleted. **Deliberately not cascaded**:
+`backupDownloads`/`fileUploads`/`commands` history for the same instance —
+these already self-expire via their existing TTL sweeps
+(`pruneExpiredDownloads`/`pruneExpiredFileUploads`) once their parent rows
+are gone or simply age out, and nothing ever queries them unscoped, so
+leaving them as harmless orphans is cheaper than an exhaustive cascade
+(same tolerance this project already extends to similar one-off gaps,
+e.g. the PID-file bootstrap gap above). On failure, nothing is cleaned up
+— the `serverInstances` row stays so the admin can retry.
+
+The dashboard's existing "Starting…"/"Stopping…"/"Restarting…" in-flight
+badges (`pendingActions` in `panel/src/routes/+page.server.ts`, derived
+from `commands` rather than `running_state` — see the "structural UX
+consequence" note under "Backups" above for why) gained a fourth:
+"Deleting…", via the identical mechanism — no new column, no new
+component. The instance page's own "Danger Zone" card (bottom of
+`panel/src/routes/instances/[serverInstanceId]/+page.svelte`) uses the
+same `ConfirmModal` + hidden-form pattern as Restore/file-delete, and
+explicitly states in the confirmation copy that backup archives are not
+deleted — a real, easy-to-miss consequence worth surfacing, not just
+documenting here.
+
 ### Raw RCON console
 
 `console_command`: an arbitrary admin command sent verbatim to a running
@@ -1009,9 +1060,11 @@ a real production Bedrock server ("nimo", home LAN, Tailscale-reachable):
   `server.properties` read/write pair (`read_properties`/
   `write_properties`) per "Server properties editor" above, file
   management (`list_files`/`upload_file`/`delete_file`,
-  `pulse/internal/filemanager/`) per "File management" above, and
+  `pulse/internal/filemanager/`) per "File management" above,
   self-update (`pulse/internal/updater/`, Ed25519-signed atomic binary
-  swap with grace-period confirm/rollback) per "Self-update" above.
+  swap with grace-period confirm/rollback) per "Self-update" above, and
+  deleting a provisioned instance (`delete_instance`,
+  `Manager.RemoveInstance`) per "Deleting a provisioned instance" above.
   `go build/vet/test` clean, including Windows/macOS cross-compiles.
 - **Panel**: single-admin auth, enrollment token generation (now on
   `/settings`), dashboard listing agents/instances with online/offline
@@ -1025,10 +1078,12 @@ a real production Bedrock server ("nimo", home LAN, Tailscale-reachable):
   confirm modal, 3 working theme palettes, an agent detail page
   (`/agents/[pulseAgentId]`, the first agent-facing view beyond the
   dashboard) with port-range/instances-dir config and a create-server
-  flow, and a "Publish Pulse release" form on `/settings` plus a
+  flow, a "Publish Pulse release" form on `/settings` plus a
   "→ vNEW available" note on the dashboard/agent pages for self-update
-  (see "Self-update" above). `svelte-check` clean; both `ADAPTER=node` and
-  `ADAPTER=cloudflare` builds pass.
+  (see "Self-update" above), and a "Danger Zone" delete-instance card on
+  the instance page with a "Deleting…" dashboard badge (see "Deleting a
+  provisioned instance" above). `svelte-check` clean; both `ADAPTER=node`
+  and `ADAPTER=cloudflare` builds pass.
 - Repo pushed to `codenexus/axon` (private), `main` branch.
 
 Deliberately deferred — don't assume half-built unless you find code for it:
@@ -1045,10 +1100,10 @@ Deliberately deferred — don't assume half-built unless you find code for it:
   builds, signs, and hosts each release binary by hand.
 - Reusable server "definitions"/templates (the old UI mockup's "Create
   Definition" concept) — server creation is direct one-shot "create this
-  specific server now," not a saved-template system. Deleting a
-  Panel-created instance. Per-host RAM-based Java heap sizing (fixed
-  `provision.DefaultJavaHeapMB` constant for every Java instance) or any
-  UI control for it. Split port ranges per edition (one shared range per
+  specific server now," not a saved-template system. Per-host RAM-based
+  Java heap sizing (fixed `provision.DefaultJavaHeapMB` constant for
+  every Java instance) or any UI control for it. Split port ranges per
+  edition (one shared range per
   agent covers both). Paper/Forge/Fabric/etc. server software (vanilla
   only) and anything beyond the latest ~3 versions per edition.
 

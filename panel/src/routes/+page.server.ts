@@ -45,12 +45,19 @@ export const load: PageServerLoad = async ({ locals }) => {
 		.where(
 			and(
 				inArray(commands.status, ['queued', 'sent']),
-				inArray(commands.type, ['start_instance', 'stop_instance', 'restart_instance'])
+				inArray(commands.type, ['start_instance', 'stop_instance', 'restart_instance', 'delete_instance'])
 			)
 		);
-	const pendingActions: Record<string, 'starting' | 'stopping' | 'restarting'> = {};
+	const pendingActions: Record<string, 'starting' | 'stopping' | 'restarting' | 'deleting'> = {};
 	for (const c of pendingStartStop) {
-		const label = c.type === 'start_instance' ? 'starting' : c.type === 'stop_instance' ? 'stopping' : 'restarting';
+		const label =
+			c.type === 'start_instance'
+				? 'starting'
+				: c.type === 'stop_instance'
+					? 'stopping'
+					: c.type === 'delete_instance'
+						? 'deleting'
+						: 'restarting';
 		pendingActions[`${c.pulseAgentId}:${c.instanceId}`] = label;
 	}
 
