@@ -7,6 +7,270 @@ documentation — see `README.md` for that, `CLAUDE.md` for architecture,
 
 ---
 
+## 2026-07-27 — Deleting a Panel-created instance
+
+### What we finished
+
+- `Manager.RemoveInstance(id, configPath, backupsDir string) error`
+  (`pulse/internal/mcserver/manager.go`) — the literal inverse of
+  `AddInstance`: same critical section, same rebuild-the-full-list-then-
+  `SaveConfig` shape, same rollback-in-memory-if-the-write-fails
+  guarantee.
+- `delete_instance` command + `executeDeleteInstance`
+  (`pulse/cmd/pulse/main.go`): stop if running → `RemoveInstance` →
+  `os.RemoveAll(working_dir)`. Dispatched in `runLoop` before `execute()`'s
+  switch, the same way `create_instance` already is, since both need
+  `configPath`/`backupsDir` that `execute()`'s signature doesn't carry.
+- Panel cascade-deletes `serverInstances`/`backups`/`backupSchedules` on
+  success, in `resolveCommandOutcome`. A "Deleting…" dashboard badge
+  reuses the existing `pendingActions` in-flight-badge mechanism
+  (`start`/`stop`/`restart` already worked this way — no new column, no
+  new component). A "Danger Zone" card on the instance page reuses the
+  `ConfirmModal` + hidden-form pattern already established for restore and
+  file/folder delete.
+- Verified in a sandbox: stopped a running stand-in instance, deleted it,
+  confirmed the process died, `working_dir` and its `pulse.instances.json`
+  entry vanished, and all three Panel DB rows cascade-deleted; also
+  verified the failure path (deleting an already-gone instance resolves
+  cleanly to `failed`, no hang).
+- `go build/vet/test` (incl. cross-compiles) and `svelte-check` (both
+  adapters) clean.
+
+### Key technical decisions (with why)
+
+- **Backup archives are never deleted by this feature** — they live in
+  the shared `backups_dir`, not under the instance's `working_dir`, so
+  deleting an instance only deletes Panel's *metadata* about its backups,
+  never the bytes on Pulse's disk. Stated explicitly in the confirmation
+  dialog, not left implicit — an easy consequence to miss.
+- **Not everything gets cascade-deleted.** `backupDownloads`/
+  `fileUploads`/`commands` history for the deleted instance are left as
+  harmless orphans rather than explicitly cleaned up — they already
+  self-expire via existing TTL sweeps and nothing ever queries them
+  unscoped once the instance's own page is gone. Matches this project's
+  existing tolerance for similar one-off gaps (e.g. the PID-file bootstrap
+  gap).
+- **No confirm-by-typing-the-name.** `ConfirmModal` is this codebase's
+  only destructive-confirmation precedent; didn't invent a stronger one
+  for this despite the higher blast radius.
+
+---
+
+## 2026-07-26 — Self-update: Ed25519-signed atomic binary swap with rollback
+
+### What we finished
+
+- `pulse/internal/updater/` ported from Beacon's `agent/internal/updater/*`
+  and `agent/tools/{keygen,sign}`, adapted to Axon's architecture:
+  `verify.go` (`VerifyBinary`, hardcoded `pinnedPublicKey`, split into an
+  unexported `verifyBinaryWithKey` for testability), `swap_unix.go`
+  (`os.Rename` + `syscall.Exec`, same PID fresh `main()`) /
+  `swap_windows.go` (rename-aside + spawn + exit — simplified from
+  Beacon's version, no Windows-service-mode branch since Pulse has none),
+  `updater.go` (the `ApplyUpdate`/grace-period confirm-or-rollback state
+  machine).
+- `pulse/tools/{keygen,sign}` — generate a keypair, sign a release binary.
+  Generated a real production keypair; the private key was surfaced only
+  in chat, never written to any file or committed.
+- Wire: `HeartbeatResponse.Update` (`protocol.UpdateInfo` —
+  version/download_url/signature_hex), Panel's `pulseReleases` table
+  (insert-only, newest-row-wins, no downgrade protection) and a "Publish
+  Pulse release" form on `/settings`.
+- Verified with a real sandboxed dry run: two Pulse binaries built with
+  distinct injected versions, signed with a throwaway keypair swapped into
+  a temporary local build of `verify.go` for the test only (never the real
+  pinned key). Confirmed live: the happy-path swap-and-confirm (including
+  `Reconcile()` re-adopting a still-running stand-in process across the
+  restart, twice, across two consecutive self-triggered updates); the
+  rejection path (a deliberately-wrong signature never swaps, Pulse keeps
+  running and keeps retrying); the rollback path (killing Panel right as
+  the swap fires so no heartbeat can ever confirm — the grace-period
+  deadline fired and `rollback()` restored the backup binary cleanly).
+- `go build/vet/test` (incl. cross-compiles), `svelte-check`, both
+  `ADAPTER` builds clean.
+
+### Key technical decisions (with why)
+
+- **No separate poll loop, unlike Beacon.** Beacon's updater has its own
+  always-on version-check cycle (5-minute stagger, 24h interval, a
+  dedicated endpoint). Axon's heartbeat is already a periodic
+  Pulse-initiated cycle, so the update check just rides
+  `HeartbeatResponse.Update` — a genuine simplification over the reference
+  implementation, not just a port.
+- **Signing, not just checksumming, is the real security boundary.**
+  `sha256sum`-matching (the manual-deploy flow's only integrity check)
+  proves a file wasn't corrupted in transit, not that Panel's word about
+  it should be trusted — Panel's heartbeat response only ever *proposes*
+  an update, `VerifyBinary` is the actual authority.
+- **`syscall.Exec`'s fresh `main()` losing in-memory instance state is
+  safe, not a new risk** — it's exactly the scenario `Manager.Reconcile()`
+  (PID-file reconciliation, 2026-07-24 entry) already exists to solve, and
+  it already runs on every Pulse startup.
+- **In-flight `create_instance` guard**: `runLoop` only applies an update
+  when `activeJobs` is empty, so a multi-minute provisioning goroutine
+  can't get silently killed by a re-exec mid-job. Panel keeps offering the
+  update every heartbeat until it's finally applied, so nothing is lost by
+  deferring.
+- **No CI/CD** — self-update automates the swap, not the build; the admin
+  still builds, signs, and hosts each release binary by hand.
+
+---
+
+## 2026-07-26 — RCON console, properties editor, file management
+
+### What we finished
+
+- **Raw RCON console**: `console_command`
+  (`Manager.RunConsoleCommand`, `pulse/internal/mcserver/rcon_command.go`)
+  — an arbitrary admin command sent verbatim to a running instance's RCON
+  port, its text response returned via a new `CommandResult.Output` field.
+  Synchronous like every command type except `create_instance`.
+- **Server properties editor**: `read_properties`/`write_properties`
+  (`ReadPropertiesFile`/`WritePropertiesFile`,
+  `pulse/internal/mcserver/properties.go`) — deliberately raw text, not a
+  structured per-key form; `write_properties` overwrites atomically
+  (temp file + rename).
+- **File management**: new `pulse/internal/filemanager/` package —
+  `List`/`Delete`/`Save` over an instance's whole `working_dir` (not just a
+  hardcoded plugins/mods folder), gated by a `resolve()` helper rejecting
+  any path escaping `working_dir`. Uploads needed a second reversed-
+  transfer pattern (after backup downloads): the admin uploads to Panel
+  first (`file_uploads` table), then Pulse *pulls* it on its own next
+  heartbeat via `PullFileUpload`.
+- Found and fixed a real, pre-existing bug while building the upload path:
+  `@sveltejs/adapter-node`'s built server caps every request body at 512K
+  by default (`BODY_SIZE_LIMIT`) — confirmed live (a >512K upload got a
+  clean 413 without the env var raised). This silently affected the
+  existing `push_backup` upload route too, not just this feature — `vite
+  dev` never enforces it, only the built server does, which is why it went
+  unnoticed until now. Documented in `panel/README.md`.
+- `go build/vet/test` and `svelte-check` clean throughout.
+
+### Key technical decisions (with why)
+
+- **`CommandResult.Output` reused three ways** (RCON response text, raw
+  `server.properties` content, JSON-encoded file listing) rather than
+  growing a new single-purpose field each time — one free-text field,
+  documented once, in both `types.go` and `protocol.ts`.
+- **`Success` vs `Output` is a deliberate split for RCON**: `Success`
+  reflects whether the RCON exchange itself worked; `Output` carries
+  whatever text came back even if the game itself rejected the command
+  (e.g. `/foo` → "Unknown command" is still a successful round-trip).
+- **Fast-poll UX pattern, reused across both console and properties**: the
+  instance page's poll drops from 3s to 1s while a command is
+  `queued`/`sent`, via a `fastPollNeeded` derived boolean — doesn't beat
+  Pulse's `--interval` floor, just shaves the perceived wait once Pulse
+  has actually reported a result.
+- **File delete is the one destructive action (besides restore) that gets
+  `ConfirmModal`** — an admin-navigable arbitrary subtree, recursive, no
+  listing shown first, no easy undo, unlike plain backup delete or a
+  console command.
+
+---
+
+## 2026-07-25 — Server provisioning: deploy new Java and Bedrock servers
+
+### What we finished
+
+- **Version/download-URL resolution lives in Panel, not Pulse**
+  (`panel/src/lib/server/versionCatalog.ts`) — plain outbound `fetch()`
+  calls that work identically on Node and Cloudflare Workers. Java
+  resolves via Mojang's public `version_manifest_v2.json` (its per-version
+  detail JSON has both the download URL and the required Java major
+  version — no hardcoded mapping table needed). Bedrock has no equivalent
+  API; Panel attempts a best-effort scrape of minecraft.net that's
+  confirmed unreliable in practice (timed out live during development,
+  likely bot-detection), so the create-server form always shows an
+  admin-editable download-URL field for Bedrock rather than trusting the
+  scrape blindly.
+- **Java runtime auto-install, Linux-only** (`pulse/internal/javaruntime/`):
+  detects an existing match first, installs via `apt-get`/`dnf`/`yum`
+  otherwise. Needs a new operational prerequisite — the Pulse service user
+  needs scoped passwordless sudo for package installation.
+- **`pulse/internal/provision/`**: downloads the release (Java →
+  `server.jar` directly; Bedrock → a zip, with the same zip-slip
+  defensive check `backup/engine.go`'s tar extraction already has, load-
+  bearing here since the archive comes from a remote third party), writes
+  `eula.txt`, patches `server-port` into `server.properties`. Bedrock's
+  launch needed a new `Env []string` field on `InstanceConfig` for
+  `LD_LIBRARY_PATH=.`.
+- **`Manager.AddInstance`** (`pulse/internal/mcserver/manager.go`) —
+  dynamic instance registration; the instance list was previously fixed at
+  process start. Atomically rewrites `pulse.instances.json` in the same
+  critical section as the in-memory insert, rolling back on a failed
+  write.
+- **Async command execution** — the one exception to `execute()`'s
+  synchronous contract. `create_instance` can take minutes (Java install,
+  download), so `runLoop` intercepts it before `execute()`'s switch and
+  runs it in a goroutine (`creationJob`, `pulse/cmd/pulse/create_instance.go`),
+  reporting a coarse phase via a new `HeartbeatRequest.InProgressCommands`
+  field until it finishes.
+- **Port + working-dir placement**: Panel auto-assigns both from an
+  admin-configured port range + instances root dir (new
+  `/agents/[pulseAgentId]` page — the first agent-detail view this project
+  has had). The port allocator considers both already-recorded ports and
+  ports claimed by a still-in-flight `create_instance` command, closing a
+  real race between two quick create-server submissions.
+- `go build/vet/test` and `svelte-check` clean.
+
+### Key technical decisions (with why)
+
+- **Deliberately narrow v1 scope**: vanilla only, latest ~3 versions per
+  edition, Linux-only Java auto-install, fixed Java heap, one shared port
+  range per agent. Reusable server "definitions"/templates, per-host RAM-
+  based heap sizing, and split port ranges per edition were all
+  consciously deferred rather than half-built.
+- **Port allocator is blind to legacy hand-configured instances** — it
+  only considers ports Panel itself knows about (`server_instances` +
+  in-flight `create_instance` payloads); a pre-existing hand-configured
+  instance never reports a port on the wire at all. Documented as a known
+  gap, not silently assumed away — the admin is responsible for picking a
+  non-colliding range.
+- **No automatic cleanup on a Pulse crash mid-provision** — the `commands`
+  row self-heals via `failStaleCommands`, but a partially-downloaded file
+  or half-created directory has no automatic sweep. Matches this
+  project's existing tolerance for similar one-off gaps.
+
+---
+
+## 2026-07-25 — Stale-command timeout, backup scheduling + retention
+
+### What we finished
+
+- **`failStaleCommands()`** (`panel/src/lib/server/commands.ts`) — a
+  command stuck `sent` past 3 missed heartbeats (reusing `isOnline()`'s
+  "presumed offline" bar) auto-resolves to `failed` with an honest
+  "timed out waiting for a result" message, and any dependent
+  `backups`/`backupDownloads` row resolves the same way a genuine failure
+  would. This closes a real gap hit during the backups work: if Pulse
+  restarts between finishing a command and the heartbeat that would
+  report it, the result is lost and the command previously sat at `sent`
+  forever (a `delete_backup` was orphaned this way and had to be fixed by
+  hand against verified on-disk reality before this existed).
+- **Backup scheduling + retention** (`panel/src/lib/server/backupSchedules.ts`):
+  one `backupSchedules` row per instance (presence of the row plus which
+  of `intervalHours`/`keepCount`/`keepDays` are non-null fully expresses
+  the state, no separate enabled flag). `queueScheduledBackupIfDue()`
+  stamps `lastRunAt` *before* the backup resolves so a short interval
+  can't cause pile-up. `applyRetention()` keeps a backup if it's the
+  newest, **or** within `keepCount`, **or** within `keepDays` — union, not
+  intersection. Both run inline during heartbeat handling, no new timer.
+  "Apply Retention Now" button exposes `applyRetention()` standalone.
+- `go build/vet/test` and `svelte-check` clean.
+
+### Key technical decisions (with why)
+
+- **Piggybacked on heartbeat requests, not a timer** — same
+  Cloudflare-compatibility constraint as `pruneExpiredDownloads()`; called
+  from the heartbeat route (agent-scoped), the dashboard load (unscoped,
+  since the owning agent may never come back), and the instance detail
+  page load (agent-scoped).
+- **A freshly-configured schedule is due on the very next heartbeat**
+  (not a full interval later) — lets the admin confirm a schedule is
+  actually wired up without a heartbeat-scale wait.
+
+---
+
 ## 2026-07-24 — Backups: create/list/delete, download, restore (Phases 1–3)
 
 ### What we finished
