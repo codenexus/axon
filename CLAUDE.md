@@ -383,6 +383,54 @@ mechanism (see "Backups" above). The instance page's "Danger Zone" card
 uses the same `ConfirmModal` + hidden-form pattern as Restore/file-delete,
 and states plainly that backup archives are not deleted.
 
+### Node detail: host stats + allowlisted diagnostic commands
+
+The agent-detail page (`/agents/[pulseAgentId]`) gained two things the
+dashboard's per-agent cards never had room for:
+
+**Host stats** — CPU/RAM were already flowing through the heartbeat and
+stored on `pulseAgents`, just never displayed here (a pure display gap).
+Disk usage (`HostMetrics.Disks`) was already on the wire too but silently
+dropped by the heartbeat route — now persisted as
+`pulseAgents.diskUsageJson` (a JSON-blob column, same convention as
+`commands.payload`, since it's structured data that's never queried, only
+displayed). Host uptime didn't exist at all — added
+`HostMetrics.UptimeSeconds` via `gopsutil/v3/host.Uptime()` in
+`pulse/internal/inventory`, distinct from `InstanceStatus.UptimeSeconds`
+(a specific Minecraft instance's uptime, not the host's).
+
+**Allowlisted diagnostic commands** (`run_diagnostic`) — a **host-level**
+command, unrelated to `console_command`'s RCON round-trip into the
+Minecraft process itself. `pulse/internal/diagnostics` (a new package,
+distinct concern from `inventory`'s passive per-heartbeat collection)
+holds a **fixed, hand-maintained allowlist** per OS
+(`allowlist_linux.go`/`allowlist_darwin.go`/`allowlist_windows.go`,
+build-tagged like the `_unix.go`/`_windows.go` process-signal split) —
+four friendly names (`uptime`, `disk_usage`, `memory`, `processes`) map
+to real OS-appropriate base commands. **Deliberately not arbitrary
+command execution**: only a name already in the allowlist can ever run;
+extra admin-supplied arguments are appended to that fixed base command
+via a real argv slice (`os/exec`, never a shell string) — the admin can
+add flags to `df`, not swap out `df` for something else. Panel offers
+this same fixed 4-name set regardless of the target agent's OS
+(`panel/src/lib/server/diagnostics.ts`), trusting Pulse to map each name
+correctly for its own platform — same "Panel stays dumb" split already
+established for Java-runtime package names. `CommandResult.Output` picks
+up a fourth documented reuse (combined stdout+stderr); no dependent DB
+row, host-level commands are stored with `commands.instanceId = ''`
+(NOT NULL, not "non-empty") since they don't target any Minecraft
+instance. UI reuses the exact RCON console transcript pattern
+(`badge-pulsing` "Sent, waiting…", fast-poll while in flight).
+
+**A real bug this caught**: `export const` from a `+page.server.ts` file
+that isn't one of SvelteKit's recognized page exports (`load`, `actions`,
+etc.) fails the production build's stricter export validation —
+`svelte-check` doesn't catch this, only `pnpm run build` does. Moved the
+diagnostic-name allowlist into a proper `$lib/server/` module instead of
+exporting it from the route file directly. Reconfirms why this project
+always checks both `ADAPTER=node` and `ADAPTER=cloudflare` builds, not
+just `svelte-check`, before calling a Panel change verified.
+
 ### Raw RCON console
 
 `console_command`: an arbitrary admin command sent verbatim to a running
@@ -835,7 +883,8 @@ see `PROJECT_LOG.md` for session-by-session detail on each:
   new Java/Bedrock vanilla servers; deleting a provisioned instance; a raw
   RCON console; a raw `server.properties` read/write pair; file
   management (list/upload/delete); self-update (Ed25519-signed atomic
-  binary swap with grace-period confirm/rollback). `go build/vet/test`
+  binary swap with grace-period confirm/rollback); allowlisted host
+  diagnostic commands (`pulse/internal/diagnostics`). `go build/vet/test`
   clean, including Windows/macOS cross-compiles.
 - **Panel**: single-admin auth; enrollment token generation; dashboard
   with online/offline status + accurate in-flight badges
@@ -844,7 +893,8 @@ see `PROJECT_LOG.md` for session-by-session detail on each:
   transcript, whitelist/op/ban moderation forms, a properties editor, and
   a "Danger Zone" delete card; a file browser; a themed confirm modal; 3
   theme palettes; an agent detail page with port-range/instances-dir
-  config and a create-server flow; a "Publish Pulse release" form +
+  config, a create-server flow, host stats (CPU/RAM/disk/uptime), and an
+  allowlisted diagnostic-command runner; a "Publish Pulse release" form +
   "→ vNEW available" note for self-update. `svelte-check` clean; both
   `ADAPTER=node` and `ADAPTER=cloudflare` builds pass. A Tauri desktop
   thin client (`panel/src-tauri/`) exists as code but is **not yet
@@ -857,10 +907,13 @@ see `PROJECT_LOG.md` for session-by-session detail on each:
 
 Deliberately deferred — don't assume half-built unless you find code for it:
 
-- Multi-user auth/RBAC, mDNS/Bonjour discovery, and a "Systems"-style
-  multi-node overview page. CI auto-publishing a release straight to
-  Panel (today the admin still pastes the download URL/signature into
-  `/settings` — see "CI/CD for Pulse releases" above for why that's a
+- Multi-user auth/RBAC and mDNS/Bonjour discovery. A separate top-level
+  multi-node list page — not needed, the dashboard already lists every
+  agent; "Node detail" above closed the actual gap (host stats +
+  diagnostics on the existing agent-detail page). CI auto-publishing a
+  release straight to Panel (today the admin still pastes the download
+  URL/signature into `/settings` — see "CI/CD for Pulse releases" above
+  for why that's a
   deliberate boundary, not a gap). A hosted/integrated tunnel for exposing
   a Minecraft server's game port without port-forwarding (playit.gg-style)
   — deferred to a later "v2", not started.

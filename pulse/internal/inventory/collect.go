@@ -7,6 +7,7 @@ import (
 	"github.com/codenexus/axon/pulse/internal/protocol"
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/disk"
+	"github.com/shirou/gopsutil/v3/host"
 	"github.com/shirou/gopsutil/v3/mem"
 )
 
@@ -27,6 +28,10 @@ func Collect() protocol.HostMetrics {
 	if vm, err := mem.VirtualMemory(); err == nil {
 		m.RAMTotalBytes = vm.Total
 		m.RAMUsedBytes = vm.Used
+	}
+
+	if uptime, err := host.Uptime(); err == nil {
+		m.UptimeSeconds = uptime
 	}
 
 	if parts, err := disk.Partitions(false); err == nil {

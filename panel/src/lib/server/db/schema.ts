@@ -36,6 +36,10 @@ export const pulseAgents = sqliteTable('pulse_agents', {
 	cpuCores: integer('cpu_cores'),
 	ramTotalBytes: integer('ram_total_bytes'),
 	ramUsedBytes: integer('ram_used_bytes'),
+	// JSON-stringified DiskUsage[] from the wire — structured but never
+	// queried, same "JSON blob column" convention as commands.payload.
+	diskUsageJson: text('disk_usage_json'),
+	hostUptimeSeconds: integer('host_uptime_seconds'),
 	createdAt: integer('created_at').notNull(),
 	// All three nullable — admin must configure before creating servers on
 	// this agent. The port allocator (portAllocator.ts) only ever considers

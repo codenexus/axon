@@ -30,6 +30,9 @@ type HostMetrics struct {
 	Disks           []DiskUsage `json:"disks"`
 	OS              string      `json:"os"`
 	Platform        string      `json:"platform"`
+	// UptimeSeconds is the host's own uptime (time since boot), not a
+	// Minecraft instance's — see InstanceStatus.UptimeSeconds for that.
+	UptimeSeconds uint64 `json:"uptime_seconds"`
 }
 
 type RunningState string
@@ -107,20 +110,22 @@ type CommandResult struct {
 	SizeBytes int64  `json:"size_bytes,omitempty"`
 	Checksum  string `json:"checksum,omitempty"` // sha256 hex
 	// Output is free-text carrying a command's actual response, reused
-	// across three unrelated command types rather than each growing its own
+	// across four unrelated command types rather than each growing its own
 	// single-purpose field: RCON response text for console_command
 	// (populated whenever the RCON round-trip itself succeeded, even if the
 	// game rejected the command — e.g. "Unknown command" is still a
 	// successful exchange); raw server.properties content for
-	// read_properties; a JSON-encoded []filemanager.Entry for list_files.
-	// Message stays reserved for "the command itself failed" in all three
-	// cases.
+	// read_properties; a JSON-encoded []filemanager.Entry for list_files;
+	// combined stdout+stderr for run_diagnostic (populated whenever the
+	// diagnostic name was recognized, even if the underlying command itself
+	// exited nonzero). Message stays reserved for "the command itself
+	// failed" in all four cases.
 	Output string `json:"output,omitempty"`
 }
 
 type Command struct {
 	ID   string `json:"id"`
-	Type string `json:"type"` // "start_instance" | "stop_instance" | "restart_instance" | "backup_instance" | "restore_backup" | "delete_backup" | "push_backup" | "create_instance" | "delete_instance" | "console_command" | "read_properties" | "write_properties" | "list_files" | "upload_file" | "delete_file"
+	Type string `json:"type"` // "start_instance" | "stop_instance" | "restart_instance" | "backup_instance" | "restore_backup" | "delete_backup" | "push_backup" | "create_instance" | "delete_instance" | "console_command" | "read_properties" | "write_properties" | "list_files" | "upload_file" | "delete_file" | "run_diagnostic"
 	// InstanceID is the id of an existing instance the command targets, for
 	// every type except create_instance — there, Panel pregenerates the id
 	// of the instance being created (which doesn't exist yet), following
@@ -196,6 +201,18 @@ type UploadFileCommandPayload struct {
 // directory).
 type DeleteFileCommandPayload struct {
 	Path string `json:"path"`
+}
+
+// RunDiagnosticCommandPayload is the Payload shape for "run_diagnostic" —
+// Name must match one of the fixed, hand-maintained allowlist entries in
+// pulse/internal/diagnostics (a friendly, cross-platform name like
+// "uptime" or "disk_usage", never a raw command); Args is optional
+// whitespace-split extra arguments appended to that fixed base command.
+// This is a host-level command, unrelated to console_command's RCON
+// round-trip into the Minecraft process.
+type RunDiagnosticCommandPayload struct {
+	Name string `json:"name"`
+	Args string `json:"args,omitempty"`
 }
 
 // UpdateInfo is set on a HeartbeatResponse whenever Panel has a published

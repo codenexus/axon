@@ -15,6 +15,7 @@ import (
 
 	"github.com/codenexus/axon/pulse/internal/backup"
 	"github.com/codenexus/axon/pulse/internal/credential"
+	"github.com/codenexus/axon/pulse/internal/diagnostics"
 	"github.com/codenexus/axon/pulse/internal/filemanager"
 	"github.com/codenexus/axon/pulse/internal/inventory"
 	"github.com/codenexus/axon/pulse/internal/mcserver"
@@ -239,6 +240,9 @@ func execute(client *protocol.Client, cred *credential.Credential, manager *mcse
 
 	case "delete_file":
 		return executeDeleteFile(manager, cmd)
+
+	case "run_diagnostic":
+		return executeRunDiagnostic(cmd)
 
 	default:
 		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "unknown command type: " + cmd.Type}
@@ -540,6 +544,24 @@ func executeDeleteFile(manager *mcserver.Manager, cmd protocol.Command) protocol
 		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: err.Error()}
 	}
 	return protocol.CommandResult{CommandID: cmd.ID, Success: true}
+}
+
+// executeRunDiagnostic runs a fixed, allowlisted host-level command —
+// unlike every other command type in this file, it has no InstanceID
+// target at all (it's about the Pulse host itself, not any Minecraft
+// instance). See pulse/internal/diagnostics for the allowlist and the
+// "Panel picks a friendly name, Pulse maps it to the real OS-appropriate
+// command" split.
+func executeRunDiagnostic(cmd protocol.Command) protocol.CommandResult {
+	var payload protocol.RunDiagnosticCommandPayload
+	if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: "invalid payload: " + err.Error()}
+	}
+	output, err := diagnostics.Run(payload.Name, payload.Args)
+	if err != nil {
+		return protocol.CommandResult{CommandID: cmd.ID, Success: false, Message: err.Error()}
+	}
+	return protocol.CommandResult{CommandID: cmd.ID, Success: true, Output: output}
 }
 
 // executeUploadFile pulls a file's bytes FROM Panel's transient holding

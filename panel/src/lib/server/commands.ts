@@ -20,7 +20,8 @@ export type CommandType =
 	| 'write_properties'
 	| 'list_files'
 	| 'upload_file'
-	| 'delete_file';
+	| 'delete_file'
+	| 'run_diagnostic';
 
 export async function queueCommand(
 	db: Db,

@@ -1,8 +1,46 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
+	import { invalidateAll } from '$app/navigation';
+	import type { ActionResult } from '@sveltejs/kit';
 	import type { ActionData, PageData } from './$types';
 
 	let { data, form }: { data: PageData; form: ActionData } = $props();
+
+	const diagnosticLabel: Record<string, string> = {
+		uptime: 'Uptime',
+		disk_usage: 'Disk usage',
+		memory: 'Memory',
+		processes: 'Processes'
+	};
+
+	// A diagnostic sent now only reaches Pulse on its next heartbeat, same
+	// latency shape as the instance page's RCON console — drop to a 1s poll
+	// while one's in flight, same fastPollNeeded pattern.
+	const diagnosticInFlight = $derived(
+		data.recentDiagnostics.some((c) => c.status === 'queued' || c.status === 'sent')
+	);
+	$effect(() => {
+		const ms = diagnosticInFlight ? 1000 : 5000;
+		const interval = setInterval(() => invalidateAll(), ms);
+		return () => clearInterval(interval);
+	});
+
+	function diagnosticPayload(entry: (typeof data.recentDiagnostics)[number]): { name?: string; args?: string } {
+		if (!entry.payload) return {};
+		try {
+			return JSON.parse(entry.payload) as { name?: string; args?: string };
+		} catch {
+			return {};
+		}
+	}
+
+	let diagnosticForm: HTMLFormElement;
+	function handleDiagnosticSubmit() {
+		return async ({ result, update }: { result: ActionResult; update: () => Promise<void> }) => {
+			await update();
+			if (result.type === 'success') diagnosticForm?.reset();
+		};
+	}
 
 	const stateLabel: Record<string, string> = {
 		stopped: 'Stopped',
@@ -23,6 +61,36 @@
 	const isConfigured = $derived(
 		data.agent.portRangeStart != null && data.agent.portRangeEnd != null && !!data.agent.instancesRootDir
 	);
+
+	function formatBytes(bytes: number | null | undefined): string {
+		if (!bytes) return '—';
+		return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+	}
+
+	function formatUptime(seconds: number | null | undefined): string {
+		if (!seconds) return '—';
+		const days = Math.floor(seconds / 86400);
+		const hours = Math.floor((seconds % 86400) / 3600);
+		if (days === 0 && hours === 0) return '<1h';
+		return days > 0 ? `${days}d ${hours}h` : `${hours}h`;
+	}
+
+	interface DiskUsage {
+		mount: string;
+		total_bytes: number;
+		used_bytes: number;
+	}
+
+	const disks = $derived<DiskUsage[]>(
+		(() => {
+			if (!data.agent.diskUsageJson) return [];
+			try {
+				return JSON.parse(data.agent.diskUsageJson) as DiskUsage[];
+			} catch {
+				return [];
+			}
+		})()
+	);
 </script>
 
 <svelte:head>
@@ -40,6 +108,84 @@
 			{/if}
 		</p>
 	</header>
+
+	<section class="card">
+		<div class="section-header">
+			<h2>Host</h2>
+		</div>
+		<div class="host-stats">
+			<div class="host-stat">
+				<span class="host-stat-label">CPU</span>
+				<span>{data.agent.cpuUsagePercent?.toFixed(0) ?? '—'}% ({data.agent.cpuCores ?? '—'} cores)</span>
+			</div>
+			<div class="host-stat">
+				<span class="host-stat-label">Memory</span>
+				<span>{formatBytes(data.agent.ramUsedBytes)} / {formatBytes(data.agent.ramTotalBytes)}</span>
+			</div>
+			<div class="host-stat">
+				<span class="host-stat-label">Uptime</span>
+				<span>{formatUptime(data.agent.hostUptimeSeconds)}</span>
+			</div>
+			{#each disks as disk (disk.mount)}
+				<div class="host-stat">
+					<span class="host-stat-label">Disk ({disk.mount})</span>
+					<span>{formatBytes(disk.used_bytes)} / {formatBytes(disk.total_bytes)}</span>
+				</div>
+			{/each}
+		</div>
+	</section>
+
+	<section class="card">
+		<div class="section-header">
+			<h2>Diagnostics</h2>
+		</div>
+		<p class="meta">
+			Runs a fixed, read-only command on the Pulse host itself — not RCON, not a Minecraft server. Only the
+			options below can ever run; nothing else is accepted.
+		</p>
+
+		<form
+			method="POST"
+			action="?/runDiagnostic"
+			use:enhance={handleDiagnosticSubmit}
+			bind:this={diagnosticForm}
+			class="diagnostic-form"
+		>
+			<select name="name" required>
+				{#each Object.entries(diagnosticLabel) as [value, label] (value)}
+					<option {value}>{label}</option>
+				{/each}
+			</select>
+			<input type="text" name="args" placeholder="extra arguments (optional)" autocomplete="off" />
+			<button type="submit">Run</button>
+		</form>
+		{#if form?.error}
+			<p class="error">{form.error}</p>
+		{/if}
+
+		{#if data.recentDiagnostics.length > 0}
+			<ul class="console-log">
+				{#each data.recentDiagnostics as entry (entry.id)}
+					{@const p = diagnosticPayload(entry)}
+					<li>
+						<div class="console-entry-header">
+							<code>&gt; {diagnosticLabel[p.name ?? ''] ?? p.name}{p.args ? ` ${p.args}` : ''}</code>
+							{#if entry.status === 'queued' || entry.status === 'sent'}
+								<span class="badge badge-warning badge-pulsing">Sent, waiting…</span>
+							{:else if entry.status === 'failed'}
+								<span class="badge badge-error">Failed</span>
+							{/if}
+						</div>
+						{#if entry.status === 'completed'}
+							<pre class="console-output">{entry.output || '(no output)'}</pre>
+						{:else if entry.status === 'failed'}
+							<p class="error">{entry.resultMessage}</p>
+						{/if}
+					</li>
+				{/each}
+			</ul>
+		{/if}
+	</section>
 
 	<section class="card">
 		<div class="section-header">
@@ -173,6 +319,24 @@
 		margin: 0;
 	}
 
+	.host-stats {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 1.25rem;
+	}
+
+	.host-stat {
+		display: flex;
+		flex-direction: column;
+		gap: 0.2rem;
+		font-size: 0.85rem;
+	}
+
+	.host-stat-label {
+		font-size: 0.75rem;
+		opacity: 0.7;
+	}
+
 	.settings-form {
 		display: flex;
 		align-items: flex-end;
@@ -250,6 +414,86 @@
 	}
 	.badge-info {
 		background: var(--axon-status-info);
+	}
+
+	.badge-pulsing {
+		animation: badge-pulse 1.4s ease-in-out infinite;
+	}
+
+	@keyframes badge-pulse {
+		0%,
+		100% {
+			opacity: 1;
+		}
+		50% {
+			opacity: 0.45;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.badge-pulsing {
+			animation: none;
+		}
+	}
+
+	.diagnostic-form {
+		display: flex;
+		gap: 0.5rem;
+		margin-bottom: 0.75rem;
+		flex-wrap: wrap;
+	}
+
+	.diagnostic-form select,
+	.diagnostic-form input {
+		padding: 0.5rem 0.625rem;
+		border-radius: 0.375rem;
+		border: 1px solid var(--axon-accent);
+		background: var(--axon-background);
+		color: var(--axon-text);
+	}
+
+	.diagnostic-form input {
+		flex: 1;
+		min-width: 10rem;
+	}
+
+	.console-log {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		max-height: 20rem;
+		overflow-y: auto;
+	}
+
+	.console-log li {
+		border-top: 1px solid var(--axon-accent);
+		padding-top: 0.5rem;
+	}
+
+	.console-entry-header {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+	}
+
+	.console-entry-header code {
+		font-family: monospace;
+		font-size: 0.85rem;
+	}
+
+	.console-output {
+		font-family: monospace;
+		font-size: 0.8rem;
+		white-space: pre-wrap;
+		word-break: break-word;
+		background: var(--axon-background);
+		border-radius: 0.375rem;
+		padding: 0.5rem 0.625rem;
+		margin: 0.4rem 0 0;
 	}
 
 	.empty {

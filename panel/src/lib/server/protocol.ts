@@ -27,6 +27,8 @@ export interface HostMetrics {
 	disks: DiskUsage[] | null;
 	os: string;
 	platform: string;
+	// The host's own uptime (time since boot), not a Minecraft instance's.
+	uptime_seconds: number;
 }
 
 export type RunningState = 'stopped' | 'starting' | 'running' | 'stopping' | 'crashed';
@@ -56,12 +58,13 @@ export interface CommandResult {
 	// upload_file result (bytes written).
 	size_bytes?: number;
 	checksum?: string; // sha256 hex
-	// Free-text carrying a command's actual response, reused across three
+	// Free-text carrying a command's actual response, reused across four
 	// unrelated command types: RCON response text for console_command
 	// (populated whenever the RCON round-trip itself succeeded, even if the
 	// game rejected the command); raw server.properties content for
-	// read_properties; a JSON-encoded FileEntry[] for list_files. message
-	// stays reserved for "the command itself failed" in all three cases.
+	// read_properties; a JSON-encoded FileEntry[] for list_files; combined
+	// stdout+stderr for run_diagnostic. message stays reserved for "the
+	// command itself failed" in all four cases.
 	output?: string;
 }
 
@@ -141,6 +144,15 @@ export interface UploadFileCommandPayload {
 // directory to remove (recursively, if a directory).
 export interface DeleteFileCommandPayload {
 	path: string;
+}
+
+// Payload shape for run_diagnostic. name must match one of Pulse's fixed,
+// hand-maintained allowlist entries (a friendly, cross-platform name like
+// "uptime" or "disk_usage", never a raw command); args is optional
+// whitespace-split extra arguments appended to that fixed base command.
+export interface RunDiagnosticCommandPayload {
+	name: string;
+	args?: string;
 }
 
 export interface HeartbeatRequestBody {

@@ -1,8 +1,9 @@
 import { error, fail } from '@sveltejs/kit';
-import { eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import type { Actions, PageServerLoad } from './$types';
-import { pulseAgents, serverInstances } from '$lib/server/db/schema';
-import { failStaleCommands } from '$lib/server/commands';
+import { commands, pulseAgents, serverInstances } from '$lib/server/db/schema';
+import { failStaleCommands, queueCommand } from '$lib/server/commands';
+import { isDiagnosticName } from '$lib/server/diagnostics';
 import { latestVersionsByPlatform, updateAvailableFor } from '$lib/server/pulseReleases';
 
 export const load: PageServerLoad = async ({ params, locals }) => {
@@ -19,7 +20,19 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 	const latestVersions = await latestVersionsByPlatform(locals.db);
 	const updateAvailable = updateAvailableFor(latestVersions, agent);
 
-	return { agent, instances, updateAvailable };
+	// Host-level commands (no instance target) are stored with
+	// instanceId='' — see the runDiagnostic action below. Last 20,
+	// newest-last, same chronological-scrollback convention as the
+	// instance page's RCON console transcript.
+	const recentDiagnostics = await locals.db
+		.select()
+		.from(commands)
+		.where(and(eq(commands.pulseAgentId, agent.id), eq(commands.type, 'run_diagnostic')))
+		.orderBy(desc(commands.createdAt))
+		.limit(20);
+	recentDiagnostics.reverse();
+
+	return { agent, instances, updateAvailable, recentDiagnostics };
 };
 
 // Empty string means "not set" — distinct from an invalid non-numeric or
@@ -59,6 +72,31 @@ export const actions: Actions = {
 			.update(pulseAgents)
 			.set({ portRangeStart, portRangeEnd, instancesRootDir })
 			.where(eq(pulseAgents.id, agent.id));
+
+		return { ok: true };
+	},
+
+	runDiagnostic: async ({ request, params, locals }) => {
+		const form = await request.formData();
+		const name = String(form.get('name') ?? '');
+		if (!isDiagnosticName(name)) {
+			return fail(400, { error: 'unknown diagnostic' });
+		}
+		const args = String(form.get('args') ?? '').trim();
+
+		const [agent] = await locals.db.select().from(pulseAgents).where(eq(pulseAgents.id, params.pulseAgentId));
+		if (!agent) return fail(404, { error: 'agent not found' });
+
+		// Host-level command, not scoped to any instance — instanceId is
+		// intentionally empty (the commands.instanceId column is NOT NULL,
+		// not "non-empty"), and the recentDiagnostics query above filters on
+		// type='run_diagnostic' rather than any instance id.
+		await queueCommand(locals.db, {
+			pulseAgentId: agent.id,
+			instanceId: '',
+			type: 'run_diagnostic',
+			payload: args ? { name, args } : { name }
+		});
 
 		return { ok: true };
 	}

@@ -37,7 +37,9 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 			cpuUsagePercent: body.host?.cpu_usage_percent,
 			cpuCores: body.host?.cpu_cores,
 			ramTotalBytes: body.host?.ram_total_bytes,
-			ramUsedBytes: body.host?.ram_used_bytes
+			ramUsedBytes: body.host?.ram_used_bytes,
+			diskUsageJson: JSON.stringify(body.host?.disks ?? []),
+			hostUptimeSeconds: body.host?.uptime_seconds
 		})
 		.where(eq(pulseAgents.id, agent.id));
 
