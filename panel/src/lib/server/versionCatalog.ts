@@ -74,6 +74,50 @@ export async function resolveBedrockVersions(db: Db): Promise<VersionCatalogEntr
 	return staleEntries(db, 'bedrock');
 }
 
+export interface ResolvedVersionSelection {
+	version: string;
+	downloadUrl: string;
+	javaMajorVersion?: number;
+}
+
+// Shared by the create-server action and the create-definition action:
+// resolves a concrete version/downloadUrl/javaMajorVersion from an
+// edition + catalog id + (Bedrock only) an optional admin-supplied URL
+// override. Java is always re-looked-up server-side by catalog id, never
+// trusted from client input — Mojang's manifest is authoritative and
+// there's no reason to let it be overridden, unlike Bedrock, which has no
+// authoritative source to defer to.
+export async function resolveVersionSelection(
+	db: Db,
+	gamePlatform: string,
+	catalogId: string,
+	bedrockUrlOverride: string
+): Promise<ResolvedVersionSelection | { error: string }> {
+	if (gamePlatform === 'java') {
+		const [entry] = await db.select().from(versionCatalogEntries).where(eq(versionCatalogEntries.id, catalogId));
+		if (!entry || entry.gamePlatform !== 'java') {
+			return { error: 'select a valid Java version' };
+		}
+		return {
+			version: entry.version,
+			downloadUrl: entry.downloadUrl,
+			javaMajorVersion: entry.javaMajorVersion ?? undefined
+		};
+	}
+
+	let catalogVersion = '';
+	if (catalogId) {
+		const [entry] = await db.select().from(versionCatalogEntries).where(eq(versionCatalogEntries.id, catalogId));
+		if (entry && entry.gamePlatform === 'bedrock') catalogVersion = entry.version;
+	}
+	const downloadUrl = bedrockUrlOverride;
+	const version = catalogVersion || 'unknown';
+	if (!downloadUrl) {
+		return { error: 'a download URL is required (the automatic lookup may have failed — see the field above)' };
+	}
+	return { version, downloadUrl };
+}
+
 async function freshEntries(db: Db, gamePlatform: string): Promise<VersionCatalogEntry[]> {
 	const now = Date.now();
 	return db

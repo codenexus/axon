@@ -349,6 +349,43 @@ race, since no `server_instances` row is pre-inserted for
 Pulse confirms the instance exists). See "Known gaps" for the allocator's
 one real limitation (blind to legacy hand-configured instances).
 
+### Reusable server definitions (templates)
+
+`serverDefinitions` — a saved preset (name, edition, version, download
+URL, Java major version) an admin creates once and reuses to create
+instances repeatedly without re-picking a version each time. **Global,
+not per-agent** — a definition describes *what* to install, not *where*,
+so it lives on `/settings` (already the home for global,
+admin-instance-wide config) rather than any per-agent page, and the
+create-server page (`/agents/[pulseAgentId]/new-instance`) offers every
+definition regardless of which agent it's creating on.
+
+**Pinned at creation time, not a live "always latest" reference**: saving
+a definition resolves a concrete version/download URL/Java major version
+right then (same `versionCatalogEntries` resolution the create-server
+form already does) and stores that permanently — using the definition
+later never re-resolves the catalog. Re-resolving on every use would
+reintroduce the catalog's own TTL/staleness handling for no real benefit;
+Mojang's old version download URLs stay valid indefinitely, so pinning is
+simpler and just as durable. If an admin wants a newer version, they make
+a new definition (or use the unaffected from-scratch flow).
+
+**Zero wire/Pulse changes** — selecting a definition on the create-server
+form just changes which Panel-side code path resolves the
+`create_instance` payload's `version`/`download_url`/`java_major_version`
+fields (the definition's own pinned values instead of a fresh
+`catalog_id` lookup); the command Pulse receives is identical either way.
+The version-resolution logic itself (`resolveVersionSelection` in
+`versionCatalog.ts`) is shared between the create-server action and the
+new-definition action — extracted once rather than duplicated, since both
+needed the exact same "Java is always re-looked-up by catalog id, Bedrock
+falls back to an admin-supplied URL override" branching.
+
+No `ConfirmModal` on delete — matches the existing convention that only
+genuinely high-blast-radius actions (restore, recursive file delete,
+delete-instance) get that treatment; deleting a template has zero effect
+on any running server.
+
 ### Deleting a provisioned instance
 
 The inverse of "Provisioning new servers" above — `delete_instance`, a
@@ -893,9 +930,10 @@ see `PROJECT_LOG.md` for session-by-session detail on each:
   transcript, whitelist/op/ban moderation forms, a properties editor, and
   a "Danger Zone" delete card; a file browser; a themed confirm modal; 3
   theme palettes; an agent detail page with port-range/instances-dir
-  config, a create-server flow, host stats (CPU/RAM/disk/uptime), and an
-  allowlisted diagnostic-command runner; a "Publish Pulse release" form +
-  "→ vNEW available" note for self-update. `svelte-check` clean; both
+  config, a create-server flow (with reusable saved server definitions),
+  host stats (CPU/RAM/disk/uptime), and an allowlisted diagnostic-command
+  runner; a "Publish Pulse release" form + "→ vNEW available" note for
+  self-update. `svelte-check` clean; both
   `ADAPTER=node` and `ADAPTER=cloudflare` builds pass. A Tauri desktop
   thin client (`panel/src-tauri/`) exists as code but is **not yet
   verified by compiling** — no Rust toolchain in the environment it was
@@ -917,13 +955,13 @@ Deliberately deferred — don't assume half-built unless you find code for it:
   deliberate boundary, not a gap). A hosted/integrated tunnel for exposing
   a Minecraft server's game port without port-forwarding (playit.gg-style)
   — deferred to a later "v2", not started.
-- Reusable server "definitions"/templates — server creation is direct
-  one-shot "create this specific server now," not a saved-template
-  system. Per-host RAM-based Java heap sizing (fixed
-  `provision.DefaultJavaHeapMB` constant) or any UI control for it. Split
-  port ranges per edition (one shared range per agent covers both).
-  Paper/Forge/Fabric/etc. server software (vanilla only) and anything
-  beyond the latest ~3 versions per edition.
+- Per-host RAM-based Java heap sizing (fixed
+  `provision.DefaultJavaHeapMB` constant) or any UI control for it — a
+  server definition can't capture this either, since there's no admin
+  input for it anywhere yet. Split port ranges per edition (one shared
+  range per agent covers both). Paper/Forge/Fabric/etc. server software
+  (vanilla only) and anything beyond the latest ~3 versions per edition.
+  Editing an existing server definition (delete and recreate instead).
 
 See `PROJECT_LOG.md` for session-by-session history and next steps, and
 `STYLE.md` for UI/UX conventions.

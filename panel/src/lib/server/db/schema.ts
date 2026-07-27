@@ -140,6 +140,22 @@ export const versionCatalogEntries = sqliteTable('version_catalog_entries', {
 	expiresAt: integer('expires_at').notNull()
 });
 
+// A reusable server-creation template — global, not per-agent (describes
+// *what* to install, not *where*). version/downloadUrl/javaMajorVersion
+// are pinned at creation time from a real versionCatalogEntries
+// resolution, not a live "always latest" reference — re-resolving on
+// every use would reintroduce the catalog's own staleness/TTL complexity,
+// and Mojang's old version download URLs stay valid indefinitely.
+export const serverDefinitions = sqliteTable('server_definitions', {
+	id: text('id').primaryKey(), // def_<random>
+	name: text('name').notNull(),
+	gamePlatform: text('game_platform').notNull(), // "java" | "bedrock"
+	version: text('version').notNull(),
+	downloadUrl: text('download_url').notNull(),
+	javaMajorVersion: integer('java_major_version'), // null for bedrock
+	createdAt: integer('created_at').notNull()
+});
+
 // Transient — Pulse pushes the backup file here on request rather than
 // Panel storing a durable second copy (see CLAUDE.md's push-backup design:
 // Pulse's own disk is the source of truth). A second download request for

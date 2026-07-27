@@ -1,10 +1,10 @@
 import { error, fail } from '@sveltejs/kit';
-import { eq } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 import type { Actions, PageServerLoad } from './$types';
-import { commands, pulseAgents, versionCatalogEntries } from '$lib/server/db/schema';
+import { commands, pulseAgents, serverDefinitions } from '$lib/server/db/schema';
 import { newInstanceId, queueCommand } from '$lib/server/commands';
 import { allocatePort } from '$lib/server/portAllocator';
-import { resolveBedrockVersions, resolveJavaVersions } from '$lib/server/versionCatalog';
+import { resolveBedrockVersions, resolveJavaVersions, resolveVersionSelection } from '$lib/server/versionCatalog';
 import type { CreateInstanceCommandPayload } from '$lib/server/protocol';
 
 export const load: PageServerLoad = async ({ params, url, locals }) => {
@@ -38,8 +38,13 @@ export const load: PageServerLoad = async ({ params, url, locals }) => {
 		}
 	}
 
+	// Definitions are global, not per-agent (they describe what to install,
+	// not where), so this is unfiltered — every definition is offered
+	// regardless of which agent's create-server page this is.
+	const definitions = await locals.db.select().from(serverDefinitions).orderBy(desc(serverDefinitions.createdAt));
+
 	if (!configured) {
-		return { agent, configured, javaVersions: [], bedrockVersions: [], pendingCommand };
+		return { agent, configured, javaVersions: [], bedrockVersions: [], definitions, pendingCommand };
 	}
 
 	const [javaVersions, bedrockVersions] = await Promise.all([
@@ -47,7 +52,7 @@ export const load: PageServerLoad = async ({ params, url, locals }) => {
 		resolveBedrockVersions(locals.db)
 	]);
 
-	return { agent, configured, javaVersions, bedrockVersions, pendingCommand };
+	return { agent, configured, javaVersions, bedrockVersions, definitions, pendingCommand };
 };
 
 export const actions: Actions = {
@@ -60,48 +65,42 @@ export const actions: Actions = {
 
 		const form = await request.formData();
 		const name = String(form.get('name') ?? '').trim();
-		const gamePlatform = String(form.get('game_platform') ?? '');
-		const catalogId = String(form.get('catalog_id') ?? '');
-		const bedrockUrlOverride = String(form.get('download_url') ?? '').trim();
+		const definitionId = String(form.get('definition_id') ?? '').trim();
 
 		if (!name) return fail(400, { error: 'name is required' });
-		if (gamePlatform !== 'java' && gamePlatform !== 'bedrock') {
-			return fail(400, { error: 'invalid edition' });
-		}
 
+		let gamePlatform: string;
 		let version: string;
 		let downloadUrl: string;
 		let javaMajorVersion: number | undefined;
 
-		if (gamePlatform === 'java') {
-			// Always re-looked-up server-side by catalog id, never trusted
-			// from client input — Mojang's manifest is authoritative and
-			// there's no reason to let it be overridden (unlike Bedrock,
-			// which has no authoritative source to defer to).
-			const [entry] = await locals.db
+		if (definitionId) {
+			// Pinned at the definition's own creation time — skip catalog
+			// resolution entirely, this is not a live/"always latest" lookup.
+			const [definition] = await locals.db
 				.select()
-				.from(versionCatalogEntries)
-				.where(eq(versionCatalogEntries.id, catalogId));
-			if (!entry || entry.gamePlatform !== 'java') {
-				return fail(400, { error: 'select a valid Java version' });
-			}
-			version = entry.version;
-			downloadUrl = entry.downloadUrl;
-			javaMajorVersion = entry.javaMajorVersion ?? undefined;
+				.from(serverDefinitions)
+				.where(eq(serverDefinitions.id, definitionId));
+			if (!definition) return fail(400, { error: 'selected definition no longer exists' });
+
+			gamePlatform = definition.gamePlatform;
+			version = definition.version;
+			downloadUrl = definition.downloadUrl;
+			javaMajorVersion = definition.javaMajorVersion ?? undefined;
 		} else {
-			let catalogVersion = '';
-			if (catalogId) {
-				const [entry] = await locals.db
-					.select()
-					.from(versionCatalogEntries)
-					.where(eq(versionCatalogEntries.id, catalogId));
-				if (entry && entry.gamePlatform === 'bedrock') catalogVersion = entry.version;
+			gamePlatform = String(form.get('game_platform') ?? '');
+			if (gamePlatform !== 'java' && gamePlatform !== 'bedrock') {
+				return fail(400, { error: 'invalid edition' });
 			}
-			downloadUrl = bedrockUrlOverride;
-			version = catalogVersion || 'unknown';
-			if (!downloadUrl) {
-				return fail(400, { error: 'a download URL is required (the automatic lookup may have failed — see the field above)' });
-			}
+
+			const catalogId = String(form.get('catalog_id') ?? '');
+			const bedrockUrlOverride = String(form.get('download_url') ?? '').trim();
+			const resolved = await resolveVersionSelection(locals.db, gamePlatform, catalogId, bedrockUrlOverride);
+			if ('error' in resolved) return fail(400, { error: resolved.error });
+
+			version = resolved.version;
+			downloadUrl = resolved.downloadUrl;
+			javaMajorVersion = resolved.javaMajorVersion;
 		}
 
 		const port = await allocatePort(locals.db, agent.id);

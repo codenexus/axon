@@ -1,8 +1,9 @@
 import { fail } from '@sveltejs/kit';
-import { desc } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 import type { Actions, PageServerLoad } from './$types';
-import { enrollmentTokens, pulseReleases } from '$lib/server/db/schema';
+import { enrollmentTokens, pulseReleases, serverDefinitions } from '$lib/server/db/schema';
 import { randomToken, sha256Hex } from '$lib/server/tokens';
+import { resolveBedrockVersions, resolveJavaVersions, resolveVersionSelection } from '$lib/server/versionCatalog';
 
 const ENROLLMENT_TOKEN_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
@@ -13,7 +14,12 @@ const SIGNATURE_HEX_LENGTH = 128;
 
 export const load: PageServerLoad = async ({ locals }) => {
 	const releases = await locals.db.select().from(pulseReleases).orderBy(desc(pulseReleases.createdAt));
-	return { releases };
+	const definitions = await locals.db.select().from(serverDefinitions).orderBy(desc(serverDefinitions.createdAt));
+	const [javaVersions, bedrockVersions] = await Promise.all([
+		resolveJavaVersions(locals.db),
+		resolveBedrockVersions(locals.db)
+	]);
+	return { releases, definitions, javaVersions, bedrockVersions };
 };
 
 export const actions: Actions = {
@@ -62,5 +68,42 @@ export const actions: Actions = {
 		});
 
 		return { published: true };
+	},
+
+	createDefinition: async ({ request, locals }) => {
+		const data = await request.formData();
+		const name = (data.get('name') as string | null)?.trim();
+		const gamePlatform = data.get('game_platform') as string | null;
+		const catalogId = (data.get('catalog_id') as string | null) ?? '';
+		const bedrockUrlOverride = ((data.get('download_url') as string | null) ?? '').trim();
+
+		if (!name) return fail(400, { error: 'a name is required' });
+		if (gamePlatform !== 'java' && gamePlatform !== 'bedrock') {
+			return fail(400, { error: 'select a valid edition' });
+		}
+
+		const resolved = await resolveVersionSelection(locals.db, gamePlatform, catalogId, bedrockUrlOverride);
+		if ('error' in resolved) return fail(400, { error: resolved.error });
+
+		await locals.db.insert(serverDefinitions).values({
+			id: `def_${randomToken(8)}`,
+			name,
+			gamePlatform,
+			version: resolved.version,
+			downloadUrl: resolved.downloadUrl,
+			javaMajorVersion: resolved.javaMajorVersion ?? null,
+			createdAt: Date.now()
+		});
+
+		return { definitionCreated: true };
+	},
+
+	deleteDefinition: async ({ request, locals }) => {
+		const data = await request.formData();
+		const id = String(data.get('id') ?? '');
+		if (!id) return fail(400, { error: 'missing definition id' });
+
+		await locals.db.delete(serverDefinitions).where(eq(serverDefinitions.id, id));
+		return { ok: true };
 	}
 };

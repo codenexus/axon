@@ -10,6 +10,10 @@
 	let selectedCatalogId = $state('');
 	let bedrockUrlOverride = $state('');
 
+	let selectedDefinitionId = $state('');
+	const usingDefinition = $derived(selectedDefinitionId !== '');
+	const selectedDefinition = $derived(data.definitions.find((d) => d.id === selectedDefinitionId));
+
 	// Pre-fill the Bedrock URL from the resolved catalog entry the first
 	// time it arrives, without clobbering an admin's own edit afterward.
 	let bedrockPrefilled = $state(false);
@@ -83,51 +87,68 @@
 					<input type="text" name="name" required />
 				</label>
 
-				<label>
-					Edition
-					<select name="game_platform" bind:value={selectedEdition}>
-						<option value="java">Java</option>
-						<option value="bedrock">Bedrock</option>
-					</select>
-				</label>
-
-				{#if selectedEdition === 'java'}
+				{#if data.definitions.length > 0}
 					<label>
-						Version
-						<select name="catalog_id" bind:value={selectedCatalogId}>
-							{#each data.javaVersions as opt (opt.id)}
-								<option value={opt.id}>{opt.version} (Java {opt.javaMajorVersion})</option>
+						Use a saved definition
+						<select bind:value={selectedDefinitionId}>
+							<option value="">— configure manually —</option>
+							{#each data.definitions as def (def.id)}
+								<option value={def.id}>{def.name}</option>
 							{/each}
 						</select>
 					</label>
-					{#if data.javaVersions.length === 0}
-						<p class="error">No Java versions available right now — try again shortly.</p>
-					{/if}
+				{/if}
+
+				{#if usingDefinition}
+					<input type="hidden" name="definition_id" value={selectedDefinitionId} />
+					<p class="meta">Will create: {selectedDefinition?.gamePlatform} · {selectedDefinition?.version}</p>
 				{:else}
 					<label>
-						Version
-						<select name="catalog_id" bind:value={selectedCatalogId}>
-							{#each data.bedrockVersions as opt (opt.id)}
-								<option value={opt.id}>{opt.version}</option>
-							{/each}
-							{#if data.bedrockVersions.length === 0}
-								<option value="">(unknown — enter URL manually below)</option>
-							{/if}
+						Edition
+						<select name="game_platform" bind:value={selectedEdition}>
+							<option value="java">Java</option>
+							<option value="bedrock">Bedrock</option>
 						</select>
 					</label>
-					<label class="grow">
-						Download URL
-						<input
-							type="text"
-							name="download_url"
-							bind:value={bedrockUrlOverride}
-							placeholder="https://www.minecraft.net/.../bedrock-server-....zip"
-						/>
-					</label>
-					<p class="meta">
-						Automatically looked up from minecraft.net — that lookup is best-effort, verify this is the URL you
-						want before creating.
-					</p>
+
+					{#if selectedEdition === 'java'}
+						<label>
+							Version
+							<select name="catalog_id" bind:value={selectedCatalogId}>
+								{#each data.javaVersions as opt (opt.id)}
+									<option value={opt.id}>{opt.version} (Java {opt.javaMajorVersion})</option>
+								{/each}
+							</select>
+						</label>
+						{#if data.javaVersions.length === 0}
+							<p class="error">No Java versions available right now — try again shortly.</p>
+						{/if}
+					{:else}
+						<label>
+							Version
+							<select name="catalog_id" bind:value={selectedCatalogId}>
+								{#each data.bedrockVersions as opt (opt.id)}
+									<option value={opt.id}>{opt.version}</option>
+								{/each}
+								{#if data.bedrockVersions.length === 0}
+									<option value="">(unknown — enter URL manually below)</option>
+								{/if}
+							</select>
+						</label>
+						<label class="grow">
+							Download URL
+							<input
+								type="text"
+								name="download_url"
+								bind:value={bedrockUrlOverride}
+								placeholder="https://www.minecraft.net/.../bedrock-server-....zip"
+							/>
+						</label>
+						<p class="meta">
+							Automatically looked up from minecraft.net — that lookup is best-effort, verify this is the URL you
+							want before creating.
+						</p>
+					{/if}
 				{/if}
 
 				{#if form?.error}

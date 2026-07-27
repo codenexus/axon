@@ -71,6 +71,13 @@
       "when": 1785185341401,
       "tag": "0009_icy_elektra",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1785186998581,
+      "tag": "0010_cheerful_the_leader",
+      "breakpoints": true
     }
   ]
 }

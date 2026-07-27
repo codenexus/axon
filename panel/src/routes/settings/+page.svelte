@@ -8,6 +8,18 @@
 	function formatTimestamp(ms: number): string {
 		return new Date(ms).toLocaleString();
 	}
+
+	let definitionEdition = $state<'java' | 'bedrock'>('java');
+	let definitionCatalogId = $state('');
+	let definitionBedrockUrl = $state('');
+
+	let bedrockPrefilled = $state(false);
+	$effect(() => {
+		if (bedrockPrefilled || data.bedrockVersions.length === 0) return;
+		definitionBedrockUrl = data.bedrockVersions[0].downloadUrl;
+		definitionCatalogId = data.bedrockVersions[0].id;
+		bedrockPrefilled = true;
+	});
 </script>
 
 <svelte:head>
@@ -112,6 +124,95 @@
 			</table>
 		{:else}
 			<p class="empty">No releases published yet.</p>
+		{/if}
+	</section>
+
+	<section class="card">
+		<h2>Server Definitions</h2>
+		<p class="meta">
+			A reusable template for creating servers — edition, version, and download URL are pinned when you save it,
+			not re-resolved later. Use one from the "Create Server" page on any agent.
+		</p>
+		<form method="POST" action="?/createDefinition" use:enhance class="release-form">
+			<label class="wide">
+				Name
+				<input type="text" name="name" placeholder="Modded Survival Preset" required />
+			</label>
+			<label>
+				Edition
+				<select name="game_platform" bind:value={definitionEdition}>
+					<option value="java">Java</option>
+					<option value="bedrock">Bedrock</option>
+				</select>
+			</label>
+			{#if definitionEdition === 'java'}
+				<label>
+					Version
+					<select name="catalog_id" bind:value={definitionCatalogId}>
+						{#each data.javaVersions as opt (opt.id)}
+							<option value={opt.id}>{opt.version} (Java {opt.javaMajorVersion})</option>
+						{/each}
+					</select>
+				</label>
+			{:else}
+				<label>
+					Version
+					<select name="catalog_id" bind:value={definitionCatalogId}>
+						{#each data.bedrockVersions as opt (opt.id)}
+							<option value={opt.id}>{opt.version}</option>
+						{/each}
+						{#if data.bedrockVersions.length === 0}
+							<option value="">(unknown — enter URL manually)</option>
+						{/if}
+					</select>
+				</label>
+				<label class="wide">
+					Download URL
+					<input
+						type="text"
+						name="download_url"
+						bind:value={definitionBedrockUrl}
+						placeholder="https://www.minecraft.net/.../bedrock-server-....zip"
+					/>
+				</label>
+			{/if}
+			<button type="submit">Save definition</button>
+		</form>
+		{#if form?.error}
+			<p class="error">{form.error}</p>
+		{/if}
+		{#if form?.definitionCreated}
+			<p class="meta">Saved.</p>
+		{/if}
+
+		{#if data.definitions.length > 0}
+			<table class="releases">
+				<thead>
+					<tr>
+						<th>Name</th>
+						<th>Edition</th>
+						<th>Version</th>
+						<th></th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each data.definitions as def (def.id)}
+						<tr>
+							<td>{def.name}</td>
+							<td>{def.gamePlatform}</td>
+							<td>{def.version}</td>
+							<td>
+								<form method="POST" action="?/deleteDefinition" use:enhance>
+									<input type="hidden" name="id" value={def.id} />
+									<button type="submit" class="ghost">Delete</button>
+								</form>
+							</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+		{:else}
+			<p class="empty">No definitions saved yet.</p>
 		{/if}
 	</section>
 </div>
@@ -242,5 +343,11 @@
 		color: var(--axon-background);
 		font-weight: 600;
 		cursor: pointer;
+	}
+
+	button.ghost {
+		background: transparent;
+		border: 1px solid var(--axon-accent);
+		color: var(--axon-text);
 	}
 </style>
