@@ -409,6 +409,19 @@ properties load/save, see below) is `queued`/`sent` — a derived
 `fastPollNeeded` boolean. Doesn't beat Pulse's `--interval` floor, just
 shaves the perceived wait once Pulse has actually reported a result.
 
+**Whitelist/op/ban forms** (the "Player Management" card, same instance
+page): purpose-built forms — whitelist add/remove/list/on/off, op/deop,
+ban/pardon/kick (with optional reasons)/banlist — that construct the
+equivalent command string and queue it as a plain `console_command`,
+identical in shape to what the raw console box already does with
+free-typed text. **No new wire type, no new Go code** — Pulse and the
+game don't know or care whether the text came from a button or typing,
+so these show up in the same transcript as raw-typed commands. Panel
+only rejects a whitespace-containing username before queuing (a
+malformed multi-arg command would otherwise go out silently) — no other
+validation of game-side acceptance is possible or attempted, same
+passthrough philosophy as the raw console itself.
+
 ### Server properties editor
 
 A raw-text editor for an instance's `server.properties`
@@ -784,23 +797,20 @@ see `PROJECT_LOG.md` for session-by-session detail on each:
   with online/offline status + accurate in-flight badges
   (starting/stopping/restarting/deleting/backing-up/restoring); a
   per-instance page with backups, scheduling/retention, an RCON console
-  transcript, a properties editor, and a "Danger Zone" delete card; a file
-  browser; a themed confirm modal; 3 theme palettes; an agent detail page
-  with port-range/instances-dir config and a create-server flow; a
-  "Publish Pulse release" form + "→ vNEW available" note for self-update.
-  `svelte-check` clean; both `ADAPTER=node` and `ADAPTER=cloudflare`
-  builds pass.
+  transcript, whitelist/op/ban moderation forms, a properties editor, and
+  a "Danger Zone" delete card; a file browser; a themed confirm modal; 3
+  theme palettes; an agent detail page with port-range/instances-dir
+  config and a create-server flow; a "Publish Pulse release" form +
+  "→ vNEW available" note for self-update. `svelte-check` clean; both
+  `ADAPTER=node` and `ADAPTER=cloudflare` builds pass.
 - Repo pushed to `codenexus/axon` (private), `main` branch.
 
 Deliberately deferred — don't assume half-built unless you find code for it:
 
-- Dedicated whitelist/op/ban forms (the raw console can already run
-  `/whitelist add`, `/op`, `/ban` etc. verbatim — this would be
-  purpose-built forms around them), multi-user auth/RBAC, mDNS/Bonjour
-  discovery, Tauri sidecar process spawning, and a "Systems"-style
-  multi-node overview page. No CI/CD or automated build/sign/publish
-  pipeline for Pulse releases — self-update automates the *swap*, not the
-  build.
+- Multi-user auth/RBAC, mDNS/Bonjour discovery, Tauri sidecar process
+  spawning, and a "Systems"-style multi-node overview page. No CI/CD or
+  automated build/sign/publish pipeline for Pulse releases — self-update
+  automates the *swap*, not the build.
 - Reusable server "definitions"/templates — server creation is direct
   one-shot "create this specific server now," not a saved-template
   system. Per-host RAM-based Java heap sizing (fixed

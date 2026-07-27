@@ -1,6 +1,7 @@
 import { error, fail, redirect } from '@sveltejs/kit';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import type { Actions, PageServerLoad } from './$types';
+import type { Db } from '$lib/server/db';
 import { backupDownloads, backups, backupSchedules, commands, pulseAgents, serverInstances } from '$lib/server/db/schema';
 import { DOWNLOAD_REQUEST_TTL_MS, pruneExpiredDownloads } from '$lib/server/backupDownloads';
 import { applyRetention } from '$lib/server/backupSchedules';
@@ -99,6 +100,24 @@ function parsePositiveIntOrNull(raw: FormDataEntryValue | null): number | null |
 	const parsed = Number(value);
 	if (!Number.isInteger(parsed) || parsed <= 0) return 'invalid';
 	return parsed;
+}
+
+// The whitelist/op/ban forms below all reduce to this: construct the
+// equivalent raw command and send it through the exact same pipe the raw
+// console box already uses (type='console_command') — Pulse and the game
+// don't know or care whether the text came from a button or free typing,
+// so no new wire type or Go code is needed for any of them.
+async function queueConsoleCommand(
+	db: Db,
+	instance: typeof serverInstances.$inferSelect,
+	command: string
+): Promise<void> {
+	await queueCommand(db, {
+		pulseAgentId: instance.pulseAgentId,
+		instanceId: instance.instanceId,
+		type: 'console_command',
+		payload: { command }
+	});
 }
 
 export const actions: Actions = {
@@ -398,5 +417,163 @@ export const actions: Actions = {
 		// The dashboard's existing poll + "Deleting…" badge (see
 		// pendingActions) carries the rest of the story.
 		throw redirect(303, '/');
+	},
+
+	whitelistAdd: async ({ request, params, locals }) => {
+		const form = await request.formData();
+		const username = String(form.get('username') ?? '').trim();
+		if (!username) return fail(400, { error: 'enter a username' });
+		if (/\s/.test(username)) return fail(400, { error: 'username cannot contain spaces' });
+
+		const [instance] = await locals.db
+			.select()
+			.from(serverInstances)
+			.where(eq(serverInstances.id, params.serverInstanceId));
+		if (!instance) return fail(404, { error: 'instance not found' });
+
+		await queueConsoleCommand(locals.db, instance, `whitelist add ${username}`);
+		return { ok: true };
+	},
+
+	whitelistRemove: async ({ request, params, locals }) => {
+		const form = await request.formData();
+		const username = String(form.get('username') ?? '').trim();
+		if (!username) return fail(400, { error: 'enter a username' });
+		if (/\s/.test(username)) return fail(400, { error: 'username cannot contain spaces' });
+
+		const [instance] = await locals.db
+			.select()
+			.from(serverInstances)
+			.where(eq(serverInstances.id, params.serverInstanceId));
+		if (!instance) return fail(404, { error: 'instance not found' });
+
+		await queueConsoleCommand(locals.db, instance, `whitelist remove ${username}`);
+		return { ok: true };
+	},
+
+	whitelistList: async ({ params, locals }) => {
+		const [instance] = await locals.db
+			.select()
+			.from(serverInstances)
+			.where(eq(serverInstances.id, params.serverInstanceId));
+		if (!instance) return fail(404, { error: 'instance not found' });
+
+		await queueConsoleCommand(locals.db, instance, 'whitelist list');
+		return { ok: true };
+	},
+
+	whitelistOn: async ({ params, locals }) => {
+		const [instance] = await locals.db
+			.select()
+			.from(serverInstances)
+			.where(eq(serverInstances.id, params.serverInstanceId));
+		if (!instance) return fail(404, { error: 'instance not found' });
+
+		await queueConsoleCommand(locals.db, instance, 'whitelist on');
+		return { ok: true };
+	},
+
+	whitelistOff: async ({ params, locals }) => {
+		const [instance] = await locals.db
+			.select()
+			.from(serverInstances)
+			.where(eq(serverInstances.id, params.serverInstanceId));
+		if (!instance) return fail(404, { error: 'instance not found' });
+
+		await queueConsoleCommand(locals.db, instance, 'whitelist off');
+		return { ok: true };
+	},
+
+	opPlayer: async ({ request, params, locals }) => {
+		const form = await request.formData();
+		const username = String(form.get('username') ?? '').trim();
+		if (!username) return fail(400, { error: 'enter a username' });
+		if (/\s/.test(username)) return fail(400, { error: 'username cannot contain spaces' });
+
+		const [instance] = await locals.db
+			.select()
+			.from(serverInstances)
+			.where(eq(serverInstances.id, params.serverInstanceId));
+		if (!instance) return fail(404, { error: 'instance not found' });
+
+		await queueConsoleCommand(locals.db, instance, `op ${username}`);
+		return { ok: true };
+	},
+
+	deopPlayer: async ({ request, params, locals }) => {
+		const form = await request.formData();
+		const username = String(form.get('username') ?? '').trim();
+		if (!username) return fail(400, { error: 'enter a username' });
+		if (/\s/.test(username)) return fail(400, { error: 'username cannot contain spaces' });
+
+		const [instance] = await locals.db
+			.select()
+			.from(serverInstances)
+			.where(eq(serverInstances.id, params.serverInstanceId));
+		if (!instance) return fail(404, { error: 'instance not found' });
+
+		await queueConsoleCommand(locals.db, instance, `deop ${username}`);
+		return { ok: true };
+	},
+
+	banPlayer: async ({ request, params, locals }) => {
+		const form = await request.formData();
+		const username = String(form.get('username') ?? '').trim();
+		if (!username) return fail(400, { error: 'enter a username' });
+		if (/\s/.test(username)) return fail(400, { error: 'username cannot contain spaces' });
+		const reason = String(form.get('reason') ?? '').trim();
+
+		const [instance] = await locals.db
+			.select()
+			.from(serverInstances)
+			.where(eq(serverInstances.id, params.serverInstanceId));
+		if (!instance) return fail(404, { error: 'instance not found' });
+
+		await queueConsoleCommand(locals.db, instance, reason ? `ban ${username} ${reason}` : `ban ${username}`);
+		return { ok: true };
+	},
+
+	pardonPlayer: async ({ request, params, locals }) => {
+		const form = await request.formData();
+		const username = String(form.get('username') ?? '').trim();
+		if (!username) return fail(400, { error: 'enter a username' });
+		if (/\s/.test(username)) return fail(400, { error: 'username cannot contain spaces' });
+
+		const [instance] = await locals.db
+			.select()
+			.from(serverInstances)
+			.where(eq(serverInstances.id, params.serverInstanceId));
+		if (!instance) return fail(404, { error: 'instance not found' });
+
+		await queueConsoleCommand(locals.db, instance, `pardon ${username}`);
+		return { ok: true };
+	},
+
+	kickPlayer: async ({ request, params, locals }) => {
+		const form = await request.formData();
+		const username = String(form.get('username') ?? '').trim();
+		if (!username) return fail(400, { error: 'enter a username' });
+		if (/\s/.test(username)) return fail(400, { error: 'username cannot contain spaces' });
+		const reason = String(form.get('reason') ?? '').trim();
+
+		const [instance] = await locals.db
+			.select()
+			.from(serverInstances)
+			.where(eq(serverInstances.id, params.serverInstanceId));
+		if (!instance) return fail(404, { error: 'instance not found' });
+
+		await queueConsoleCommand(locals.db, instance, reason ? `kick ${username} ${reason}` : `kick ${username}`);
+		return { ok: true };
+	},
+
+	banList: async ({ params, locals }) => {
+		const [instance] = await locals.db
+			.select()
+			.from(serverInstances)
+			.where(eq(serverInstances.id, params.serverInstanceId));
+		if (!instance) return fail(404, { error: 'instance not found' });
+
+		await queueConsoleCommand(locals.db, instance, 'banlist');
+		return { ok: true };
 	}
 };

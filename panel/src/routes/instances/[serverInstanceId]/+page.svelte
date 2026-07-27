@@ -242,6 +242,138 @@
 
 	<section class="card">
 		<div class="section-header">
+			<h2>Player Management</h2>
+		</div>
+		{#if data.instance.runningState !== 'running'}
+			<p class="meta">The instance must be running to send RCON commands.</p>
+		{/if}
+
+		<div class="mod-group">
+			<h3>Whitelist</h3>
+			<form method="POST" action="?/whitelistAdd" use:enhance class="mod-form">
+				<input
+					type="text"
+					name="username"
+					placeholder="username"
+					autocomplete="off"
+					required
+					disabled={data.instance.runningState !== 'running'}
+				/>
+				<button type="submit" disabled={data.instance.runningState !== 'running'}>Add</button>
+			</form>
+			<form method="POST" action="?/whitelistRemove" use:enhance class="mod-form">
+				<input
+					type="text"
+					name="username"
+					placeholder="username"
+					autocomplete="off"
+					required
+					disabled={data.instance.runningState !== 'running'}
+				/>
+				<button type="submit" class="ghost" disabled={data.instance.runningState !== 'running'}>Remove</button>
+			</form>
+			<div class="mod-actions">
+				<form method="POST" action="?/whitelistList" use:enhance>
+					<button type="submit" class="ghost" disabled={data.instance.runningState !== 'running'}>List</button>
+				</form>
+				<form method="POST" action="?/whitelistOn" use:enhance>
+					<button type="submit" class="ghost" disabled={data.instance.runningState !== 'running'}>On</button>
+				</form>
+				<form method="POST" action="?/whitelistOff" use:enhance>
+					<button type="submit" class="ghost" disabled={data.instance.runningState !== 'running'}>Off</button>
+				</form>
+			</div>
+		</div>
+
+		<div class="mod-group">
+			<h3>Ops</h3>
+			<form method="POST" action="?/opPlayer" use:enhance class="mod-form">
+				<input
+					type="text"
+					name="username"
+					placeholder="username"
+					autocomplete="off"
+					required
+					disabled={data.instance.runningState !== 'running'}
+				/>
+				<button type="submit" disabled={data.instance.runningState !== 'running'}>Op</button>
+			</form>
+			<form method="POST" action="?/deopPlayer" use:enhance class="mod-form">
+				<input
+					type="text"
+					name="username"
+					placeholder="username"
+					autocomplete="off"
+					required
+					disabled={data.instance.runningState !== 'running'}
+				/>
+				<button type="submit" class="ghost" disabled={data.instance.runningState !== 'running'}>Deop</button>
+			</form>
+		</div>
+
+		<div class="mod-group">
+			<h3>Bans</h3>
+			<form method="POST" action="?/banPlayer" use:enhance class="mod-form">
+				<input
+					type="text"
+					name="username"
+					placeholder="username"
+					autocomplete="off"
+					required
+					disabled={data.instance.runningState !== 'running'}
+				/>
+				<input
+					type="text"
+					name="reason"
+					placeholder="reason (optional)"
+					autocomplete="off"
+					disabled={data.instance.runningState !== 'running'}
+				/>
+				<button type="submit" disabled={data.instance.runningState !== 'running'}>Ban</button>
+			</form>
+			<form method="POST" action="?/pardonPlayer" use:enhance class="mod-form">
+				<input
+					type="text"
+					name="username"
+					placeholder="username"
+					autocomplete="off"
+					required
+					disabled={data.instance.runningState !== 'running'}
+				/>
+				<button type="submit" class="ghost" disabled={data.instance.runningState !== 'running'}>Pardon</button>
+			</form>
+			<form method="POST" action="?/kickPlayer" use:enhance class="mod-form">
+				<input
+					type="text"
+					name="username"
+					placeholder="username"
+					autocomplete="off"
+					required
+					disabled={data.instance.runningState !== 'running'}
+				/>
+				<input
+					type="text"
+					name="reason"
+					placeholder="reason (optional)"
+					autocomplete="off"
+					disabled={data.instance.runningState !== 'running'}
+				/>
+				<button type="submit" disabled={data.instance.runningState !== 'running'}>Kick</button>
+			</form>
+			<div class="mod-actions">
+				<form method="POST" action="?/banList" use:enhance>
+					<button type="submit" class="ghost" disabled={data.instance.runningState !== 'running'}>List bans</button>
+				</form>
+			</div>
+		</div>
+
+		{#if form?.error}
+			<p class="error">{form.error}</p>
+		{/if}
+	</section>
+
+	<section class="card">
+		<div class="section-header">
 			<h2>Server Properties</h2>
 			<form method="POST" action="?/loadProperties" use:enhance>
 				<button type="submit" class="ghost">Load current properties</button>
@@ -642,6 +774,42 @@
 		background: var(--axon-background);
 		color: var(--axon-text);
 		width: 8rem;
+	}
+
+	.mod-group {
+		margin-bottom: 1rem;
+	}
+
+	.mod-group:last-child {
+		margin-bottom: 0;
+	}
+
+	.mod-group h3 {
+		margin: 0 0 0.5rem;
+		font-size: 0.9rem;
+		opacity: 0.85;
+	}
+
+	.mod-form {
+		display: flex;
+		gap: 0.5rem;
+		margin-bottom: 0.5rem;
+		flex-wrap: wrap;
+	}
+
+	.mod-form input {
+		flex: 1;
+		min-width: 8rem;
+		padding: 0.5rem 0.625rem;
+		border-radius: 0.375rem;
+		border: 1px solid var(--axon-accent);
+		background: var(--axon-background);
+		color: var(--axon-text);
+	}
+
+	.mod-actions {
+		display: flex;
+		gap: 0.5rem;
 	}
 
 	.backups {
