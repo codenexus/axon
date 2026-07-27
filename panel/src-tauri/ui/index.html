@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<title>Axon Panel</title>
+	<style>
+		:root {
+			color-scheme: light dark;
+		}
+		body {
+			margin: 0;
+			min-height: 100vh;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			font-family: system-ui, -apple-system, sans-serif;
+			background: #14171c;
+			color: #e6e8eb;
+		}
+		main {
+			width: 100%;
+			max-width: 360px;
+			padding: 2rem;
+		}
+		h1 {
+			font-size: 1.1rem;
+			margin: 0 0 0.5rem;
+		}
+		p {
+			font-size: 0.85rem;
+			opacity: 0.7;
+			margin: 0 0 1.5rem;
+			line-height: 1.4;
+		}
+		label {
+			display: block;
+			font-size: 0.8rem;
+			opacity: 0.85;
+			margin-bottom: 0.35rem;
+		}
+		input {
+			width: 100%;
+			box-sizing: border-box;
+			padding: 0.5rem 0.625rem;
+			border-radius: 0.375rem;
+			border: 1px solid #3a3f47;
+			background: #1c2027;
+			color: #e6e8eb;
+			font-size: 0.9rem;
+			margin-bottom: 1rem;
+		}
+		button {
+			width: 100%;
+			padding: 0.55rem;
+			border-radius: 0.375rem;
+			border: none;
+			background: #4f7cff;
+			color: white;
+			font-weight: 600;
+			font-size: 0.9rem;
+			cursor: pointer;
+		}
+		button:disabled {
+			opacity: 0.6;
+			cursor: default;
+		}
+		.error {
+			color: #ff6b6b;
+			font-size: 0.8rem;
+			margin: 0.75rem 0 0;
+		}
+	</style>
+</head>
+<body>
+	<main>
+		<h1>Connect to Axon Panel</h1>
+		<p>Enter the URL of an already-running Axon Panel instance — the same address you'd use to open it in a browser.</p>
+		<form id="connect-form">
+			<label for="url">Panel URL</label>
+			<input
+				id="url"
+				name="url"
+				type="text"
+				placeholder="https://panel.example.com"
+				autocomplete="off"
+				autocapitalize="off"
+				spellcheck="false"
+				required
+			/>
+			<button type="submit">Connect</button>
+		</form>
+		<p id="error" class="error" hidden></p>
+	</main>
+
+	<script>
+		const { invoke } = window.__TAURI__.core;
+
+		const form = document.getElementById('connect-form');
+		const urlInput = document.getElementById('url');
+		const errorEl = document.getElementById('error');
+
+		invoke('get_panel_url')
+			.then((url) => {
+				if (url) urlInput.value = url;
+			})
+			.catch(() => {
+				// No saved URL yet — leave the field blank, this is the normal first-run case.
+			});
+
+		form.addEventListener('submit', (event) => {
+			event.preventDefault();
+			errorEl.hidden = true;
+
+			const button = form.querySelector('button');
+			button.disabled = true;
+
+			invoke('set_panel_url', { url: urlInput.value.trim() })
+				.catch((err) => {
+					errorEl.textContent = String(err);
+					errorEl.hidden = false;
+					button.disabled = false;
+				});
+			// On success, Rust navigates this window away to the configured URL —
+			// nothing further to do here.
+		});
+	</script>
+</body>
+</html>

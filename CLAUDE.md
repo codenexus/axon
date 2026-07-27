@@ -629,10 +629,23 @@ Bedrock creation needs no such rule.
 
 `panel/vite.config.ts` picks `@sveltejs/adapter-node` or
 `@sveltejs/adapter-cloudflare` based on the `ADAPTER` env var — same
-routes/components/logic either way. Tauri (`panel/src-tauri/`) wraps the
-node-adapter build as a desktop shell; it's scaffolded but not functional
-yet (no sidecar spawning `build/index.js`, so `tauri dev` only works
-because `devUrl` points at a running `vite dev`).
+routes/components/logic either way.
+
+**Tauri (`panel/src-tauri/`) is a thin desktop client, not a fourth
+deployment target for Panel's own backend.** It has no local server, no
+local DB, and no build-time dependency on Panel's SvelteKit build at
+all — the only "frontend" it bundles is a tiny static config page
+(`src-tauri/ui/index.html`). On first run it asks for an already-running
+Panel's URL (the same address you'd type into a browser), saves it, and
+points the native webview at it; later runs go straight there, and a
+"Change Panel URL…" menu item lets the admin repoint it. This
+deliberately replaced an earlier "spawn `node build/index.js` as a local
+sidecar" plan — that assumed Panel only exists while the desktop app is
+open, which doesn't fit wanting one Panel reachable from multiple
+machines/networks (e.g. a home LAN today, a VPS added later). Axon
+doesn't need to know or care how that Panel is reachable (LAN, Tailscale,
+a public domain) — same as browser access, unchanged. **Not yet verified
+by compiling** — see `src-tauri/README.md`.
 
 The DB layer (`panel/src/lib/server/db/index.ts`) branches on
 `platform?.env?.DB`: if present (Cloudflare), uses `drizzle-orm/d1`
@@ -833,7 +846,10 @@ see `PROJECT_LOG.md` for session-by-session detail on each:
   theme palettes; an agent detail page with port-range/instances-dir
   config and a create-server flow; a "Publish Pulse release" form +
   "→ vNEW available" note for self-update. `svelte-check` clean; both
-  `ADAPTER=node` and `ADAPTER=cloudflare` builds pass.
+  `ADAPTER=node` and `ADAPTER=cloudflare` builds pass. A Tauri desktop
+  thin client (`panel/src-tauri/`) exists as code but is **not yet
+  verified by compiling** — no Rust toolchain in the environment it was
+  written in; see "Panel: one codebase, three adapters" above.
 - Repo pushed to `codenexus/axon` (**public**, AGPL-3.0), `main` branch. A
   tag-triggered CI/CD pipeline (`.github/workflows/release.yml`)
   cross-compiles, signs, and publishes a GitHub Release for Pulse — see
@@ -841,11 +857,13 @@ see `PROJECT_LOG.md` for session-by-session detail on each:
 
 Deliberately deferred — don't assume half-built unless you find code for it:
 
-- Multi-user auth/RBAC, mDNS/Bonjour discovery, Tauri sidecar process
-  spawning, and a "Systems"-style multi-node overview page. CI auto-
-  publishing a release straight to Panel (today the admin still pastes
-  the download URL/signature into `/settings` — see "CI/CD for Pulse
-  releases" above for why that's a deliberate boundary, not a gap).
+- Multi-user auth/RBAC, mDNS/Bonjour discovery, and a "Systems"-style
+  multi-node overview page. CI auto-publishing a release straight to
+  Panel (today the admin still pastes the download URL/signature into
+  `/settings` — see "CI/CD for Pulse releases" above for why that's a
+  deliberate boundary, not a gap). A hosted/integrated tunnel for exposing
+  a Minecraft server's game port without port-forwarding (playit.gg-style)
+  — deferred to a later "v2", not started.
 - Reusable server "definitions"/templates — server creation is direct
   one-shot "create this specific server now," not a saved-template
   system. Per-host RAM-based Java heap sizing (fixed
