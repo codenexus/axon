@@ -2,12 +2,23 @@ use std::fs;
 
 use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder};
 
 #[derive(Serialize, Deserialize, Default)]
 struct DesktopConfig {
     panel_url: Option<String>,
 }
+
+// The real Panel window and the tiny local config page share the same
+// "main" window id, but the config page (ui/index.html) is deliberately
+// small -- once an admin picks a URL, set_panel_url navigates that same
+// window in place rather than opening a new one, and navigate() alone
+// doesn't resize it. Without an explicit resize afterward the whole app
+// stays stuck at the config page's small dimensions, which makes Panel's
+// own centered, max-width layout look broken (its background color fills
+// the excess space) and can push header controls like Settings outside
+// the visible/clickable area entirely.
+const PANEL_WINDOW_SIZE: (f64, f64) = (1100.0, 800.0);
 
 // The desktop shell is a thin client, not a local Panel backend: it just
 // remembers which already-running Panel instance to point the webview
@@ -63,6 +74,9 @@ fn set_panel_url(app: AppHandle, url: String) -> Result<(), String> {
         window
             .navigate(parsed)
             .map_err(|e| format!("navigate: {e}"))?;
+        window
+            .set_size(LogicalSize::new(PANEL_WINDOW_SIZE.0, PANEL_WINDOW_SIZE.1))
+            .map_err(|e| format!("resize window: {e}"))?;
     }
     Ok(())
 }
@@ -88,7 +102,7 @@ fn show_panel(app: &AppHandle, url: &str) -> Result<(), String> {
     let parsed = tauri::Url::parse(url).map_err(|e| format!("invalid saved URL: {e}"))?;
     WebviewWindowBuilder::new(app, "main", WebviewUrl::External(parsed))
         .title("Axon Panel")
-        .inner_size(1100.0, 800.0)
+        .inner_size(PANEL_WINDOW_SIZE.0, PANEL_WINDOW_SIZE.1)
         .resizable(true)
         .build()
         .map_err(|e| format!("build window: {e}"))?;

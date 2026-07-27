@@ -225,6 +225,8 @@
 		</form>
 		{#if form?.error}
 			<p class="error">{form.error}</p>
+		{:else if form?.ok}
+			<p class="success">Saved.</p>
 		{/if}
 
 		{#if isConfigured}
@@ -498,6 +500,12 @@
 
 	.empty {
 		opacity: 0.7;
+	}
+
+	.success {
+		color: var(--axon-status-success);
+		font-size: 0.8rem;
+		margin: 0.5rem 0 0;
 	}
 
 	.error {
