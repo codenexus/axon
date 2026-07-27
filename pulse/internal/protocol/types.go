@@ -198,6 +198,17 @@ type DeleteFileCommandPayload struct {
 	Path string `json:"path"`
 }
 
+// UpdateInfo is set on a HeartbeatResponse whenever Panel has a published
+// release for this agent's os/arch that differs from what it just
+// reported — Pulse verifies and applies it, never trusting Panel's say-so
+// alone (updater.VerifyBinary is the actual authority).
+type UpdateInfo struct {
+	Version      string `json:"version"`
+	DownloadURL  string `json:"download_url"`
+	SignatureHex string `json:"signature_hex"`
+}
+
 type HeartbeatResponse struct {
-	Commands []Command `json:"commands,omitempty"`
+	Commands []Command   `json:"commands,omitempty"`
+	Update   *UpdateInfo `json:"update,omitempty"`
 }

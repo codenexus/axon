@@ -173,3 +173,23 @@ export const fileUploads = sqliteTable('file_uploads', {
 	createdAt: integer('created_at').notNull(),
 	expiresAt: integer('expires_at') // TTL backstop for a hold nobody's Pulse agent ever came to collect
 });
+
+// Admin-published Pulse releases, for self-update. Insert-only — no
+// upsert, no "current" flag — the heartbeat route always takes the newest
+// row (by createdAt) for a given (os, arch), so publishing a new version
+// naturally supersedes the old one. Panel never verifies signatureHex
+// itself (that's Pulse's job via updater.VerifyBinary, the real security
+// boundary); this table is metadata relay only — the admin is responsible
+// for actually building, signing, and hosting the binary somewhere Pulse
+// can reach. Deliberately no downgrade protection: Pulse's version string
+// is a git-describe short hash with no total order, so "differs from what
+// the agent reports" is Panel's whole comparison — see CLAUDE.md.
+export const pulseReleases = sqliteTable('pulse_releases', {
+	id: text('id').primaryKey(), // rel_<random>
+	version: text('version').notNull(),
+	os: text('os').notNull(), // "linux" | "darwin" | "windows"
+	arch: text('arch').notNull(), // "amd64" | "arm64"
+	downloadUrl: text('download_url').notNull(),
+	signatureHex: text('signature_hex').notNull(),
+	createdAt: integer('created_at').notNull()
+});

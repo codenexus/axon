@@ -1,14 +1,19 @@
 import { json, error } from '@sveltejs/kit';
-import { and, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import type { RequestHandler } from './$types';
-import { commands, pulseAgents, serverInstances } from '$lib/server/db/schema';
+import { commands, pulseAgents, pulseReleases, serverInstances } from '$lib/server/db/schema';
 import { failStaleCommands, resolveCommandOutcome } from '$lib/server/commands';
 import { pruneExpiredDownloads } from '$lib/server/backupDownloads';
 import { pruneExpiredFileUploads } from '$lib/server/fileUploads';
 import { runSchedulesForAgent } from '$lib/server/backupSchedules';
 import { bearerToken } from '$lib/server/http';
 import { sha256Hex } from '$lib/server/tokens';
-import type { HeartbeatRequestBody, HeartbeatResponseBody, WireCommand } from '$lib/server/protocol';
+import type {
+	HeartbeatRequestBody,
+	HeartbeatResponseBody,
+	UpdateInfo,
+	WireCommand
+} from '$lib/server/protocol';
 
 export const POST: RequestHandler = async ({ request, locals }) => {
 	const token = bearerToken(request);
@@ -123,6 +128,27 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 		}
 	}
 
-	const response: HeartbeatResponseBody = { commands: wireCommands };
+	// Self-update: offer the newest published release for this agent's
+	// os/arch whenever its version differs from what it just reported.
+	// Self-resolving — once Pulse swaps and restarts, its next heartbeat
+	// reports the new version and this stops matching, no cleanup needed.
+	// No downgrade protection: pulse_version is a git-describe short hash
+	// with no total order, so "differs" is the whole check — see CLAUDE.md.
+	let update: UpdateInfo | undefined;
+	const [latestRelease] = await locals.db
+		.select()
+		.from(pulseReleases)
+		.where(and(eq(pulseReleases.os, agent.os), eq(pulseReleases.arch, agent.arch)))
+		.orderBy(desc(pulseReleases.createdAt))
+		.limit(1);
+	if (latestRelease && latestRelease.version !== body.pulse_version) {
+		update = {
+			version: latestRelease.version,
+			download_url: latestRelease.downloadUrl,
+			signature_hex: latestRelease.signatureHex
+		};
+	}
+
+	const response: HeartbeatResponseBody = { commands: wireCommands, update };
 	return json(response);
 };

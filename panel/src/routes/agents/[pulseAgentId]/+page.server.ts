@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import type { Actions, PageServerLoad } from './$types';
 import { pulseAgents, serverInstances } from '$lib/server/db/schema';
 import { failStaleCommands } from '$lib/server/commands';
+import { latestVersionsByPlatform, updateAvailableFor } from '$lib/server/pulseReleases';
 
 export const load: PageServerLoad = async ({ params, locals }) => {
 	const [agent] = await locals.db.select().from(pulseAgents).where(eq(pulseAgents.id, params.pulseAgentId));
@@ -15,7 +16,10 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 		.from(serverInstances)
 		.where(eq(serverInstances.pulseAgentId, agent.id));
 
-	return { agent, instances };
+	const latestVersions = await latestVersionsByPlatform(locals.db);
+	const updateAvailable = updateAvailableFor(latestVersions, agent);
+
+	return { agent, instances, updateAvailable };
 };
 
 // Empty string means "not set" — distinct from an invalid non-numeric or

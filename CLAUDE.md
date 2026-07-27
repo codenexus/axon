@@ -44,6 +44,12 @@ during this feature's development. If you build Pulse by hand (not via
 `-ldflags` — e.g.
 `GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=$(git describe --always --dirty)" -o pulse ./cmd/pulse`.
 
+To publish a signed release for self-update (see "Self-update" below):
+`go run ./tools/keygen` once to generate a keypair (never reuse this for a
+second key — see that section), then for each release binary
+`AXON_SIGNING_KEY=<hex private key> go run ./tools/sign <binary-path>` to
+get the hex signature to paste into Panel's `/settings` publish form.
+
 ### Panel (SvelteKit)
 
 ```sh
@@ -106,10 +112,10 @@ connections. This replaced an earlier gRPC-based prototype: Cloudflare
 Workers (the hosted Panel target) doesn't support gRPC, and none of Axon's
 actual requirements (console tailing, commands, metrics) need bidirectional
 streaming. It deliberately mirrors the team's Beacon RMM agent pattern, and
-several pieces are directly ported/adapted from it (self-update, when it
-lands, should be ported wholesale from Beacon's `agent/internal/updater/*`
-and `agent/tools/{keygen,sign}` — Ed25519 sign/verify + atomic binary swap
-with rollback on failed startup).
+several pieces are directly ported/adapted from it — including self-update
+(`pulse/internal/updater/`, ported from Beacon's `agent/internal/updater/*`
+and `agent/tools/{keygen,sign}`; see "Self-update" below for what changed
+in the port).
 
 The wire contract lives in two parallel type definitions kept in sync by
 hand, not by shared schema/codegen: `pulse/internal/protocol/types.go` (Go)
@@ -120,7 +126,8 @@ and `panel/src/lib/server/protocol.ts` (TypeScript).
   (so Panel can compute a "next heartbeat in ~Ns" countdown instead of
   guessing a fixed default — added for the backups UI, see below). Panel
   upserts `server_instances` rows and returns any queued commands, marking
-  them `sent`.
+  them `sent`, plus an optional `update` field (see "Self-update" below)
+  whenever a newer Pulse release is published for this agent's os/arch.
 - **Command results** are piggybacked onto the *next* heartbeat
   (`pending_command_results`) rather than pushed immediately — a resolved
   design decision (simplicity over latency, matches Beacon precedent), not a
@@ -595,10 +602,142 @@ enforces it, only the built server does, which is why it went unnoticed
 through this project's whole development-so-far. See `panel/README.md`'s
 "Running the built adapter-node server directly" section.
 
-### Deploying Pulse to a real host — currently fully manual
+### Self-update
 
-There's no CI/CD or auto-update pipeline yet. The established flow for this
-feature's iteration: cross-compile with the `-X main.version=...` ldflags
+`pulse/internal/updater/` — Pulse can update itself in place once a signed
+release is published on Panel, ported from Beacon's
+`agent/internal/updater/*` and `agent/tools/{keygen,sign}` with the
+adaptations below. This only covers *updating* an already-enrolled Pulse;
+first install onto a host is still the fully-manual flow in "Deploying
+Pulse to a real host" below — there's no running Pulse to self-update
+*from* yet on a brand-new host.
+
+**Signing** (`verify.go`, `pulse/tools/{keygen,sign}`): releases are
+signed with Ed25519, not just checksummed — `sha256sum`-matching (the
+manual-deploy flow's only integrity check) proves the file wasn't
+corrupted in transit, not that Panel's word about it should be trusted;
+signing is the actual security boundary, since a compromised or spoofed
+Panel response is exactly what this needs to be robust against. `VerifyBinary(path, sigHex)`
+checks a hex Ed25519 signature over the SHA-256 digest of the downloaded
+file against a hardcoded `pinnedPublicKey` — split into an unexported
+`verifyBinaryWithKey(path, sigHex, pubKeyHex)` so tests can exercise the
+crypto with a throwaway keypair instead of the real one.
+`pulse/tools/keygen` (`go run ./tools/keygen`) generates a keypair;
+`pulse/tools/sign` (`AXON_SIGNING_KEY=<hex private key> go run ./tools/sign
+<binary-path>`) prints the hex signature to publish alongside a release.
+**The private key is never committed or persisted anywhere in this
+repo or on any filesystem it touches** — generated once, surfaced only in
+chat for the user to store externally (password manager), same handling
+as any other one-time secret this project generates (enrollment tokens).
+Only the public key lives in source (`verify.go`'s `pinnedPublicKey`).
+
+**Swap + restart** (`swap_unix.go`/`swap_windows.go`, build-tag split like
+every other platform-specific pair in this codebase): Unix backs up the
+running binary, `os.Rename`s the new one into place (atomic, same
+filesystem — the kernel keeps the old inode alive via the current
+process's open fd), then `syscall.Exec`s into it, replacing the process
+image in place — **same PID, but a completely fresh `main()`**. Windows
+can't do that same rename-over-a-running-exe trick as a *no-op* (unlike
+Unix, opening a file doesn't pin its name), but Windows locks by handle,
+not by name, so a rename of the running exe *away* is still legal — swap
+renames the old exe aside, moves the new one into its place, spawns it,
+and exits.
+Simplified from Beacon's version: no Windows-service-mode branch (and no
+`golang.org/x/sys/windows/svc` dependency for it), since Pulse has no
+service-mode capability anywhere else in this codebase.
+
+**Why the PID-losing-in-memory-state restart is safe, not a new risk**:
+`syscall.Exec`'s fresh `main()` forgets everything Pulse knew about
+already-running Minecraft processes — this is *exactly* the scenario
+`Manager.Reconcile()` (see "PID-file process reconciliation" above)
+already exists to solve, and it already runs early in every Pulse
+startup. Self-update is a real, automatic instance of the restart case
+that machinery was built for — confirmed live in the sandboxed
+verification below (`reconciled instance "..." with already-running pid
+N` logged across a self-triggered swap).
+
+**Grace-period confirm/rollback state machine** (`updater.go`): before
+swapping, `ApplyUpdate` writes `update-state.json` (pending version,
+backup path, a deadline 10 minutes out — `gracePeriod`) into
+`credential.Dir()`, then swaps. On the *next* process start (i.e.
+immediately after the swap-triggered restart), `Start()` finds this file
+and launches `awaitConfirmation`, which selects between `checkInC` (fed
+by `NotifyCheckIn()`, called from `main.go`'s `runLoop` after every
+*successful* heartbeat) and the deadline timer: confirmed → delete the
+state file and the backup binary; unconfirmed (Panel unreachable, new
+binary broken, etc.) → `rollback()` restores the backup and re-execs into
+it. Both paths were exercised live, not just unit-tested — see below.
+
+**Ported from Beacon, but structurally simpler — no separate poll loop**:
+Beacon's updater has its own always-on version-check loop (5-minute
+startup stagger, 24h interval, a dedicated `GET .../version` endpoint).
+Axon doesn't need any of that — Pulse's heartbeat is already a
+periodic Pulse-initiated cycle on its own `--interval`, so the update
+check just rides `HeartbeatResponse.Update` (`protocol.UpdateInfo` —
+`version`/`download_url`/`signature_hex`, mirrored in `protocol.ts`).
+`main.go`'s `runLoop` calls `updater.ApplyUpdate(exePath, credential.Dir(),
+*resp.Update)` directly after processing that heartbeat's commands, no
+separate polling goroutine, timer, or endpoint exists. `downloadFile` uses
+an explicit no-timeout `http.Client{}` (`downloadHTTPClient`), matching
+this codebase's established explicit-client convention (see
+`uploadHTTPClient` in "Backups" above) rather than Beacon's implicit
+`http.Get`.
+
+**In-flight guard, beyond what Beacon needed**: `runLoop` only calls
+`ApplyUpdate` when `len(activeJobs) == 0` — an update landing mid a
+multi-minute `create_instance` provisioning job would otherwise silently
+kill that goroutine on re-exec. If a job's in flight, the update is simply
+deferred; Panel keeps offering it on every subsequent heartbeat until
+versions match (see below), so nothing is lost by waiting.
+
+**Panel: `pulseReleases` table + `/settings` publish form** — insert-only,
+no upsert, no "current" flag: the heartbeat route always takes the newest
+row (`ORDER BY createdAt DESC LIMIT 1`) for a given `(os, arch)`, so
+publishing a new release naturally supersedes the old one. **Panel never
+verifies the signature itself** — that's Pulse's job (`VerifyBinary`, the
+real security boundary); Panel's publish form is metadata relay only, the
+admin is responsible for actually building, signing (`pulse/tools/sign`),
+and hosting the binary somewhere Pulse can reach. **Deliberately no
+downgrade protection**: Pulse's version string is a `git describe` short
+hash with no total order, so "the newest published release's version
+differs from what this agent just reported" is Panel's whole comparison —
+matches this project's existing single-admin trust model (same reasoning
+already applied to port-pool ranges, retention config, etc.), not a new
+relaxation. `latestVersionsByPlatform`/`updateAvailableFor`
+(`panel/src/lib/server/pulseReleases.ts`) share this same comparison
+between the heartbeat route and the dashboard/agent-page "→ vNEW
+available" note (cosmetic only — the update itself is fully automatic
+from Panel's perspective once published; there's no separate
+progress UI, the version string on the agent card just changes on a
+later heartbeat).
+
+**Verification note**: the swap/restart/reconcile/confirm/rollback
+mechanics can't be meaningfully unit-tested (swapping the actual test
+binary's own process isn't something `go test` can safely exercise) — they
+were verified with a real sandboxed dry run instead: two real Pulse
+binaries (old + new, distinct injected `-X main.version=...` strings)
+against a throwaway Ed25519 keypair swapped into a temporary local build of
+`verify.go` for the test only (never the real pinned key), serving the new
+binary from a local static file server and seeding a `pulseReleases` row
+by hand. Confirmed live: the happy-path swap-and-confirm (including
+`Reconcile()` re-adopting a still-running stand-in Minecraft process
+across the restart, twice, across two consecutive self-triggered
+updates); the rejection path (a deliberately-wrong signature never swaps,
+Pulse keeps running the original binary and keeps retrying every
+heartbeat); and the rollback path (killing Panel right as the swap fires
+so no heartbeat can ever confirm — the grace-period deadline fired,
+`rollback()` restored the backup binary with no error, and the process
+resumed heartbeating normally afterward). The in-flight `create_instance`
+guard was verified by code inspection only (a one-line boolean condition,
+low risk) rather than a live run, given the setup cost of a real
+multi-minute provisioning job in the sandbox.
+
+### Deploying Pulse to a real host — first install is still manual
+
+Self-update (above) only covers updating an *already-enrolled* Pulse.
+First install onto a new host has no bootstrap path yet — there's no
+running Pulse to self-update *from*. The established flow for this:
+cross-compile with the `-X main.version=...` ldflags
 above, `scp` to `<host>:/tmp/pulse-new`, verify the `sha256sum` matches on
 both ends, then hand the actual privileged swap to the human — **`sudo`
 commands run over SSH to a remote host are blocked by the auto-mode
@@ -868,9 +1007,11 @@ a real production Bedrock server ("nimo", home LAN, Tailscale-reachable):
   per "Provisioning new servers" above, a raw RCON console
   (`console_command`) per "Raw RCON console" above, a raw
   `server.properties` read/write pair (`read_properties`/
-  `write_properties`) per "Server properties editor" above, and file
+  `write_properties`) per "Server properties editor" above, file
   management (`list_files`/`upload_file`/`delete_file`,
-  `pulse/internal/filemanager/`) per "File management" above.
+  `pulse/internal/filemanager/`) per "File management" above, and
+  self-update (`pulse/internal/updater/`, Ed25519-signed atomic binary
+  swap with grace-period confirm/rollback) per "Self-update" above.
   `go build/vet/test` clean, including Windows/macOS cross-compiles.
 - **Panel**: single-admin auth, enrollment token generation (now on
   `/settings`), dashboard listing agents/instances with online/offline
@@ -884,8 +1025,10 @@ a real production Bedrock server ("nimo", home LAN, Tailscale-reachable):
   confirm modal, 3 working theme palettes, an agent detail page
   (`/agents/[pulseAgentId]`, the first agent-facing view beyond the
   dashboard) with port-range/instances-dir config and a create-server
-  flow. `svelte-check` clean; both `ADAPTER=node` and `ADAPTER=cloudflare`
-  builds pass.
+  flow, and a "Publish Pulse release" form on `/settings` plus a
+  "→ vNEW available" note on the dashboard/agent pages for self-update
+  (see "Self-update" above). `svelte-check` clean; both `ADAPTER=node` and
+  `ADAPTER=cloudflare` builds pass.
 - Repo pushed to `codenexus/axon` (private), `main` branch.
 
 Deliberately deferred — don't assume half-built unless you find code for it:
@@ -894,9 +1037,12 @@ Deliberately deferred — don't assume half-built unless you find code for it:
   commands — the raw console can already run `/whitelist add`, `/op`,
   `/ban` etc. verbatim, this would be purpose-built forms around them),
   multi-user auth/RBAC, mDNS/Bonjour discovery, Tauri sidecar process
-  spawning, self-update, and a "Systems"-style multi-node overview page
-  (the current dashboard already lists multiple agents, but nothing like
-  the old mockup's dedicated node-detail/diagnostic-command view exists).
+  spawning, and a "Systems"-style multi-node overview page (the current
+  dashboard already lists multiple agents, but nothing like the old
+  mockup's dedicated node-detail/diagnostic-command view exists). No
+  CI/CD or automated build/sign/publish pipeline for Pulse releases —
+  self-update automates the *swap*, not the build; the admin still
+  builds, signs, and hosts each release binary by hand.
 - Reusable server "definitions"/templates (the old UI mockup's "Create
   Definition" concept) — server creation is direct one-shot "create this
   specific server now," not a saved-template system. Deleting a

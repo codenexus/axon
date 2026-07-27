@@ -4,6 +4,7 @@ import type { Actions, PageServerLoad } from './$types';
 import { backups, commands, pulseAgents, serverInstances } from '$lib/server/db/schema';
 import { destroySession } from '$lib/server/auth';
 import { failStaleCommands, queueCommand } from '$lib/server/commands';
+import { latestVersionsByPlatform, updateAvailableFor } from '$lib/server/pulseReleases';
 
 export const load: PageServerLoad = async ({ locals }) => {
 	const agents = await locals.db.select().from(pulseAgents);
@@ -53,10 +54,13 @@ export const load: PageServerLoad = async ({ locals }) => {
 		pendingActions[`${c.pulseAgentId}:${c.instanceId}`] = label;
 	}
 
+	const latestVersions = await latestVersionsByPlatform(locals.db);
+
 	return {
 		agents: agents.map((agent) => ({
 			...agent,
-			instances: instances.filter((i) => i.pulseAgentId === agent.id)
+			instances: instances.filter((i) => i.pulseAgentId === agent.id),
+			updateAvailable: updateAvailableFor(latestVersions, agent)
 		})),
 		instancesBackingUp,
 		pendingActions

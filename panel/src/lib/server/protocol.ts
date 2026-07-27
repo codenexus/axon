@@ -163,6 +163,17 @@ export interface WireCommand {
 	payload?: unknown;
 }
 
+// Set on a HeartbeatResponseBody whenever Panel has a published release for
+// this agent's os/arch that differs from what it just reported — Pulse
+// verifies (updater.VerifyBinary) and applies it, never trusting Panel's
+// say-so alone.
+export interface UpdateInfo {
+	version: string;
+	download_url: string;
+	signature_hex: string;
+}
+
 export interface HeartbeatResponseBody {
 	commands?: WireCommand[];
+	update?: UpdateInfo;
 }

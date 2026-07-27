@@ -122,7 +122,13 @@
 						></span>
 						{agent.hostname}
 					</h2>
-					<p class="meta">{agent.os}/{agent.arch} · Pulse v{agent.pulseVersion} · last seen {lastSeenLabel(agent.lastSeenAt)}</p>
+					<p class="meta">
+						{agent.os}/{agent.arch} · Pulse v{agent.pulseVersion}
+						{#if agent.updateAvailable}
+							<span class="update-note">→ v{agent.updateAvailable} available</span>
+						{/if}
+						· last seen {lastSeenLabel(agent.lastSeenAt)}
+					</p>
 				</div>
 				<div class="host-metrics">
 					<span>CPU {agent.cpuUsagePercent?.toFixed(0) ?? '—'}%</span>
@@ -267,6 +273,11 @@
 		font-size: 0.8rem;
 		opacity: 0.7;
 		margin: 0.15rem 0 0;
+	}
+
+	.update-note {
+		color: var(--axon-status-info);
+		opacity: 1;
 	}
 
 	.instances {

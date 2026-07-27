@@ -33,7 +33,12 @@
 	<header>
 		<p class="breadcrumb"><a href="/">← Dashboard</a></p>
 		<h1>{data.agent.hostname}</h1>
-		<p class="meta">{data.agent.os}/{data.agent.arch} · Pulse v{data.agent.pulseVersion}</p>
+		<p class="meta">
+			{data.agent.os}/{data.agent.arch} · Pulse v{data.agent.pulseVersion}
+			{#if data.updateAvailable}
+				<span class="update-note">→ v{data.updateAvailable} available</span>
+			{/if}
+		</p>
 	</header>
 
 	<section class="card">
@@ -142,6 +147,11 @@
 		font-size: 0.8rem;
 		opacity: 0.7;
 		margin: 0.15rem 0 0;
+	}
+
+	.update-note {
+		color: var(--axon-status-info);
+		opacity: 1;
 	}
 
 	.card {

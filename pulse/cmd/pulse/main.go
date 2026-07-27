@@ -19,6 +19,7 @@ import (
 	"github.com/codenexus/axon/pulse/internal/inventory"
 	"github.com/codenexus/axon/pulse/internal/mcserver"
 	"github.com/codenexus/axon/pulse/internal/protocol"
+	"github.com/codenexus/axon/pulse/internal/updater"
 )
 
 // version is a var, not a const, so `-ldflags -X main.version=...` linker
@@ -62,8 +63,19 @@ func main() {
 	}
 	backupEngine := backup.NewEngine(backupsDir)
 
+	// exePath is empty for `go run`/test binaries (os.Executable resolves
+	// them to a transient path updater.Start already treats as a dev
+	// build); self-update is simply disabled in that case rather than
+	// failing startup.
+	exePath, err := os.Executable()
+	if err != nil {
+		log.Printf("could not resolve executable path, self-update disabled: %v", err)
+		exePath = ""
+	}
+	updater.Start(exePath, credential.Dir())
+
 	client := protocol.NewClient(cred.ServerURL)
-	runLoop(client, cred, manager, backupEngine, *configPath, backupsDir, *interval)
+	runLoop(client, cred, manager, backupEngine, *configPath, backupsDir, exePath, *interval)
 }
 
 func enroll(serverURL, token string) (*credential.Credential, error) {
@@ -91,7 +103,7 @@ func enroll(serverURL, token string) (*credential.Credential, error) {
 	return cred, nil
 }
 
-func runLoop(client *protocol.Client, cred *credential.Credential, manager *mcserver.Manager, backupEngine *backup.Engine, configPath, backupsDir string, interval time.Duration) {
+func runLoop(client *protocol.Client, cred *credential.Credential, manager *mcserver.Manager, backupEngine *backup.Engine, configPath, backupsDir, exePath string, interval time.Duration) {
 	var pendingResults []protocol.CommandResult
 	// activeJobs tracks create_instance commands still provisioning across
 	// multiple heartbeat cycles — see create_instance.go's package doc.
@@ -129,6 +141,7 @@ func runLoop(client *protocol.Client, cred *credential.Credential, manager *mcse
 			continue
 		}
 		pendingResults = nil
+		updater.NotifyCheckIn()
 
 		for _, cmd := range resp.Commands {
 			if cmd.Type == "create_instance" {
@@ -136,6 +149,22 @@ func runLoop(client *protocol.Client, cred *credential.Credential, manager *mcse
 				continue
 			}
 			pendingResults = append(pendingResults, execute(client, cred, manager, backupEngine, cmd))
+		}
+
+		// An update landing mid multi-minute create_instance provisioning
+		// would otherwise silently kill that goroutine on re-exec — defer
+		// until activeJobs drains. Panel keeps offering it on every
+		// subsequent heartbeat until versions match, so nothing is lost by
+		// waiting.
+		if resp.Update != nil && len(activeJobs) == 0 {
+			if exePath == "" {
+				log.Printf("update to %s available but self-update is disabled (no resolved executable path)", resp.Update.Version)
+			} else if err := updater.ApplyUpdate(exePath, credential.Dir(), *resp.Update); err != nil {
+				log.Printf("update to %s failed: %v", resp.Update.Version, err)
+			}
+			// On success, ApplyUpdate does not return (process image
+			// replaced or, on Windows, a new process spawned and this one
+			// exits) — nothing after this point in the loop ever runs.
 		}
 
 		time.Sleep(interval)
