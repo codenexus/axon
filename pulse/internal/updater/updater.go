@@ -27,6 +27,23 @@ import (
 // Beacon's own constant.
 const gracePeriod = 10 * time.Minute
 
+// lastConfirmedFile persists the most recently confirmed update's version
+// string, surviving the process restart a successful swap always causes
+// (so an in-memory guard alone can't work here). Defense in depth against
+// a real production incident: a CI git-describe quirk (nothing to do with
+// this package) made a built binary's own reported version never exactly
+// equal the tag name published to Panel, so the "differs from what was
+// last reported" self-update trigger (see main.go's runLoop and
+// CLAUDE.md's self-update section) stayed permanently true even
+// immediately after a successful swap+confirm — Pulse re-applied the
+// "same" update every single heartbeat, indefinitely, confirmed live on
+// a real host. The CI bug is fixed at the source, but this guard stays:
+// whatever the reason a heartbeat might offer an update matching one
+// already confirmed, re-applying it can only waste bandwidth/disk and
+// briefly interrupt the process for zero benefit, never a legitimate
+// case worth allowing.
+const lastConfirmedFile = "last-confirmed-version.txt"
+
 // downloadHTTPClient has no timeout — a Pulse binary is a multi-MB
 // download, must not be aborted by a short default. Explicit rather than
 // relying on http.Get's implicit no-timeout default, matching this
@@ -81,6 +98,9 @@ func awaitConfirmation(exe string, state updateState, statePath string) {
 		log.Printf("updater: update to %s confirmed", state.PendingVersion)
 		os.Remove(statePath)
 		os.Remove(state.BackupPath)
+		if err := os.WriteFile(filepath.Join(filepath.Dir(statePath), lastConfirmedFile), []byte(state.PendingVersion), 0o600); err != nil {
+			log.Printf("updater: could not persist confirmed version (non-fatal): %v", err)
+		}
 	case <-time.After(time.Until(deadline)):
 		log.Printf("updater: update to %s unconfirmed — rolling back", state.PendingVersion)
 		os.Remove(statePath)
@@ -103,6 +123,11 @@ func awaitConfirmation(exe string, state updateState, statePath string) {
 // received. On success this function does not return — atomicSwap
 // replaces the process image (or spawns a new one and exits, on Windows).
 func ApplyUpdate(exe, credDir string, info protocol.UpdateInfo) error {
+	if last, err := os.ReadFile(filepath.Join(credDir, lastConfirmedFile)); err == nil && string(last) == info.Version {
+		log.Printf("updater: %s was already confirmed by this process before — refusing to re-apply (Panel may be comparing against a stale/mismatched reported version)", info.Version)
+		return nil
+	}
+
 	statePath := filepath.Join(credDir, "update-state.json")
 	newPath := exe + ".new"
 

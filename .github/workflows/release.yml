@@ -16,6 +16,22 @@ jobs:
         with:
           fetch-depth: 0 # git describe needs tag history
 
+      # Real bug, caught live in production (v0.1.1 through v0.1.3): the
+      # tag that *triggers* a tag-push workflow isn't reliably present as
+      # a proper named ref after actions/checkout's initial fetch, even
+      # with fetch-depth: 0 -- git describe then falls back to the
+      # nearest *older* tag plus a commit suffix (e.g. a build at the
+      # v0.1.3 tag reported itself as "v0.1.2-1-g3e93406"). Harmless on
+      # its own, but self-update's version check ("differs from what was
+      # last reported" -- see CLAUDE.md) treats that mismatched string as
+      # "always a newer version available", even immediately after
+      # successfully updating to the exact release that produced it --
+      # causing Pulse to re-apply the "update" every single heartbeat
+      # forever. Confirmed live on nimo: every ~8-13s, indefinitely, until
+      # manually stopped. Real GitHub Actions tags refetch fixes it.
+      - name: Ensure the triggering tag is actually resolvable by git describe
+        run: git fetch --tags --force
+
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22"

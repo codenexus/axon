@@ -133,6 +133,41 @@ path) — a real unauthenticated WebSocket connected successfully before
   installer). A standalone Durable Object spike against a real account
   should be the first thing that touches Cloudflare here.
 
+### Real production incident: self-update infinite loop on nimo
+
+nimo's Panel was redeployed to `server.mjs`, `v0.1.3` was tagged, and —
+for the first time since this project began — self-update actually
+completed successfully on a real host (a real permissions fix earlier
+this same session, see below, was what finally unblocked it). It then
+immediately started re-applying the same "update" every ~8-13 seconds,
+indefinitely. Root cause: a CI `git describe` quirk (a well-known
+`actions/checkout` gotcha — the tag that triggers a tag-push workflow
+isn't reliably visible to `git describe` right after checkout, even with
+`fetch-depth: 0`) meant the built binary's own reported version
+(`v0.1.2-1-g3e93406`) never exactly matched the literal tag string
+(`v0.1.3`) published to Panel — so "differs from what was last reported"
+stayed permanently true. Caught by accident while investigating why the
+adaptive interval didn't look right in a live timing test; the timing
+anomaly turned out to be the restart loop itself, not an interval bug.
+Stopped immediately by hand-correcting the published release's version
+string in nimo's DB to match what the binary actually reports; properly
+fixed at the root (`git fetch --tags --force` added to
+`release.yml`) and given defense in depth (`updater.go` now persists the
+last version it itself confirmed and refuses to re-apply it, regardless
+of why Panel offers it again — a guard that survives the process restart
+a successful swap always causes, unlike an in-memory check). See
+CLAUDE.md's "Self-update" section for full detail.
+
+Also fixed in the same investigation: `/usr/local/bin/pulse` (and its
+containing directory) were `root:root`, but Pulse runs as the
+unprivileged `axon` service account per this project's own documented
+deploy flow — self-update's binary-swap `os.Rename` had been silently
+failing on every heartbeat this whole time, on every host, since the
+feature was written. Fixed on nimo with a sticky bit + group-write on
+`/usr/local/bin` plus handing `axon` ownership of just its own `pulse`
+binary (not the whole directory) — narrow enough that `axon` still can't
+touch any other root-owned binary that might live there.
+
 ### Next 2–3 logical steps
 
 1. **Cloudflare Durable Object spike** — deploy just `InstanceHub` (a
@@ -140,13 +175,7 @@ path) — a real unauthenticated WebSocket connected successfully before
    Cloudflare account, confirming the wrapper-export approach actually
    works against the pinned `adapter-cloudflare`/wrangler versions,
    before trusting the full real-time feature there.
-2. **Redeploy nimo's Panel to `server.mjs`** — the systemd unit's
-   `ExecStart=` still points at the old `node build/index.js` run
-   command; needs updating once this session's work ships, or the new
-   real-time push layer simply won't function there (WebSocket upgrades
-   silently fail, falls back to polling only — not a hard break, but
-   not the intended behavior either).
-3. Still open from prior sessions: verify Fabric/Forge provisioning
+2. Still open from prior sessions: verify Fabric/Forge provisioning
    against a real Java environment, and run a real restore against
    nimo's actual backups.
 

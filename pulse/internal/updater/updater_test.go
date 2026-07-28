@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/codenexus/axon/pulse/internal/protocol"
 )
 
 func TestSaveLoadStateRoundTrip(t *testing.T) {
@@ -71,6 +73,48 @@ func TestNotifyCheckInDoesNotBlockWithoutAListener(t *testing.T) {
 	select {
 	case <-checkInC:
 	default:
+	}
+}
+
+// Real production incident, reproduced here: a CI git-describe quirk made
+// a built binary's own reported version never exactly equal the tag name
+// published to Panel, so the "differs from what was last reported"
+// self-update trigger stayed permanently true even immediately after a
+// successful swap+confirm -- Pulse re-applied the "same" update every
+// single heartbeat, indefinitely, on a real host. ApplyUpdate must refuse
+// to re-apply a version this process already confirmed, regardless of why
+// Panel is offering it again. Uses an unreachable download URL to prove
+// the guard fires before any network attempt, not just before the swap.
+func TestApplyUpdateRefusesAlreadyConfirmedVersion(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, lastConfirmedFile), []byte("v0.1.3"), 0o600); err != nil {
+		t.Fatalf("seed lastConfirmedFile: %v", err)
+	}
+
+	exe := filepath.Join(dir, "pulse")
+	if err := os.WriteFile(exe, []byte("fake binary"), 0o755); err != nil {
+		t.Fatalf("write fake exe: %v", err)
+	}
+
+	err := ApplyUpdate(exe, dir, protocol.UpdateInfo{
+		Version:      "v0.1.3",
+		DownloadURL:  "http://127.0.0.1:1/unreachable", // proves no download was attempted
+		SignatureHex: "irrelevant",
+	})
+	if err != nil {
+		t.Fatalf("ApplyUpdate for an already-confirmed version should return nil, got: %v", err)
+	}
+
+	// A genuinely different version must still be attempted normally (and
+	// fail here only because the download URL is unreachable, not because
+	// the guard incorrectly blocked it).
+	err = ApplyUpdate(exe, dir, protocol.UpdateInfo{
+		Version:      "v0.1.4",
+		DownloadURL:  "http://127.0.0.1:1/unreachable",
+		SignatureHex: "irrelevant",
+	})
+	if err == nil {
+		t.Fatal("expected ApplyUpdate for a genuinely new version to attempt the download and fail, got nil error")
 	}
 }
 

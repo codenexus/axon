@@ -874,6 +874,29 @@ the next process start, `Start()` finds this file and launches
 deadline timer: confirmed → delete the state file and backup; unconfirmed
 → `rollback()` restores the backup and re-execs into it.
 
+**Real production incident — infinite self-update loop** (found live on
+nimo, the first time self-update ever actually completed end-to-end on a
+real host): CI's `git describe` (via the `PULSE_VERSION` Makefile var)
+doesn't reliably see the tag that *triggers* a tag-push release build —
+a well-known `actions/checkout` gotcha, not fixed by `fetch-depth: 0`
+alone — so a binary built at tag `v0.1.3` reported its own version as
+`v0.1.2-1-g3e93406` (the nearest *older* tag plus a commit suffix), never
+literally `v0.1.3`. Since self-update's whole trigger is "differs from
+what was last reported" (previous paragraph), and Panel's published
+release row was the literal string `v0.1.3` (what the admin typed into
+the publish form), the comparison stayed permanently true — Pulse kept
+re-downloading, re-verifying, and re-swapping the *exact same* binary
+every single heartbeat, indefinitely, confirmed live at ~8-13s intervals
+until manually stopped by rewriting the published release's version
+string in the DB to match what the binary actually reported. Two fixes,
+both real: `.github/workflows/release.yml` now runs `git fetch --tags
+--force` right after checkout (the actual root cause); `updater.go`
+independently persists the last version *this process itself* confirmed
+(`last-confirmed-version.txt` in `credential.Dir()`, survives the
+restart a successful swap always causes, so an in-memory guard couldn't
+work here) and refuses to re-apply it — defense in depth against this
+exact failure mode recurring for any reason, not just this one CI bug.
+
 **No separate poll loop, unlike Beacon**: Beacon's updater has its own
 always-on version-check loop; Axon's heartbeat is already periodic and
 Pulse-initiated, so the update check rides `HeartbeatResponse.Update`
@@ -972,7 +995,8 @@ around). The swap itself:
 
 ```sh
 sudo mv /tmp/pulse-new /usr/local/bin/pulse
-sudo chown root:root /usr/local/bin/pulse && sudo chmod 755 /usr/local/bin/pulse
+sudo chown <service-user>:<service-user> /usr/local/bin/pulse && sudo chmod 755 /usr/local/bin/pulse
+sudo chmod +t /usr/local/bin   # if not already set -- see prerequisite below
 sudo kill <old-pid>
 sudo -u <service-user> bash -c 'nohup /usr/local/bin/pulse --server-url <url> --config <path> --interval 30s > <logfile> 2>&1 & disown'
 ```
@@ -982,6 +1006,23 @@ Verify by checking `Reconcile()` logged an adoption
 (`reconciled instance "X" with already-running pid N`) if a game server
 process was already running, and that Panel's `last_seen_at` updates again
 shortly after.
+
+**New prerequisite for self-update to actually work**: found live on
+nimo — self-update's binary swap (`os.Rename` over the running
+executable, see "Self-update" below) needs *write permission on the
+directory containing the binary*, not just the binary itself. A plain
+`chown root:root` on the binary (an earlier, reasonable-looking version
+of this exact snippet) silently defeats every future self-update
+attempt if Pulse runs as an unprivileged service user, as documented
+here — the swap fails every single heartbeat with no user-visible
+symptom beyond "the version never changes." Fix once per host:
+
+```sh
+sudo chgrp <service-user> /usr/local/bin
+sudo chmod g+w /usr/local/bin
+sudo chmod +t /usr/local/bin   # sticky bit: even with group write, only a file's own owner (or root) can rename/delete it -- keeps <service-user> from touching *other* root-owned binaries that might share this directory
+sudo chown <service-user>:<service-user> /usr/local/bin/pulse
+```
 
 **New prerequisite for server provisioning**: if Java-edition server
 creation is going to be used on a host, the Pulse service user needs a
