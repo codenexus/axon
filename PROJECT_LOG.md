@@ -7,6 +7,151 @@ documentation — see `README.md` for that, `CLAUDE.md` for architecture,
 
 ---
 
+## 2026-07-28 — nimo Panel deployment, bug-fix sprint, adaptive interval + real-time push
+
+### What we finished
+
+A long session covering three phases: getting Panel running persistently
+on nimo for real (not just tested), a string of real bugs found by
+actually using it, and a two-part latency fix (adaptive heartbeat
+interval + a real-time push layer) plus configurable Java heap/
+server.properties defaults.
+
+**nimo Panel deployment**: Panel now runs as a systemd **user** service
+on nimo (`~/.config/systemd/user/axon-panel.service`, `linger` enabled
+so it survives logout/reboot), built with `ADAPTER=node`, reachable over
+the LAN at `10.0.0.73:3000`. Installed Node 22.22/pnpm the hard way —
+`corepack`'s bundled pnpm hit `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING`
+on this Node build, worked around by installing `pnpm` directly via
+`npm install -g --prefix ~/.local`. nimo's Pulse binary turned out to
+predate both `create_instance` and self-update entirely (it couldn't
+self-update to fix itself), so it needed one manual binary swap using
+the already-built `v0.1.1` GitHub release asset; every release after
+that self-updates normally. Also discovered mid-session that `sudo`
+wildcard command args (`apt-get install -y openjdk-*`) are rejected
+outright on this system's sudo build ("wildcards are not allowed in
+command arguments") — fixed with an explicit per-package-name allowlist
+instead (see CLAUDE.md's "Deploying Pulse to a real host").
+
+**Real bugs found by actually using Panel on nimo** (all fixed, verified
+live against nimo, not just locally):
+- Session cookie `Secure` flag was `!dev` (true for every production
+  build), silently breaking login on any plain-HTTP LAN deploy — browsers
+  accept a `Secure` cookie over `http://` but never send it back, causing
+  a silent login→redirect→login loop. Never caught before because every
+  prior test ran against `localhost`, which Chrome/Firefox treat as a
+  secure context regardless of scheme. Now derived from the actual
+  request's `url.protocol`.
+- Tauri's `set_panel_url` navigated the existing window from the small
+  config-page size (420×420) to the real Panel URL via `.navigate()`,
+  which doesn't resize the window — looked like a UI glitch (background
+  color filling the excess space) and a dead Settings click (pushed out
+  of the visible area). Fixed by resizing to the same dimensions
+  `show_panel()` already uses.
+- The provisioning save form returned `{ok: true}` but the template only
+  ever rendered `form?.error` — a successful save looked like it silently
+  did nothing.
+- `.settings-form`/`.release-form` inputs had no `box-sizing: border-box`
+  — the instances-directory field visibly overlapped the Save button next
+  to it (browser default content-box sizing adds padding/border on top
+  of a `width: 100%`, not within it).
+- `/settings`'s `load()` hit all 5 version-catalog resolvers with **no
+  fetch timeout anywhere** — on a fresh empty cache, minecraft.net's
+  flaky Bedrock scrape took *minutes* to fail, looking identical to a
+  dead Settings button. Fixed with an 8s `AbortSignal.timeout` on every
+  fetch, **and** a new negative-cache table (`versionCatalogFetchAttempts`)
+  so a reliably-failing endpoint isn't retried on every single page load
+  (confirmed: first load after the fix still cost 8s, second load 43ms).
+- The "Backups →" link/page title were a naming holdover from before the
+  instance page grew a console, properties editor, player management,
+  and a danger zone — renamed to "Manage".
+- Instance rows only ever showed name/badge/edition/version, wasting most
+  of the row's width even though `playerCount`/`uptimeSeconds` already
+  flow through the heartbeat — same "data exists, never displayed" shape
+  as the earlier host-stats gap. Restructured into a row layout (info
+  left, stats+actions right) on both the dashboard and agent-detail
+  pages, and added a small inline server-icon next to each instance name
+  so agent cards and the actual Minecraft servers inside them don't look
+  visually interchangeable.
+
+**Configurable Java heap size + server.properties defaults** and
+**Adaptive heartbeat interval + real-time push layer**: see CLAUDE.md's
+new "Configurable Java heap size + server.properties defaults at
+creation" and "Adaptive heartbeat interval + real-time push layer"
+sections for the full detail — too much to duplicate here. Short version:
+Java heap was a hardcoded 2048MB constant with zero admin control, now
+configurable per server with sensible pre-filled defaults; a console
+command's round trip could take up to ~2x Pulse's heartbeat interval
+regardless of network distance (a real point of user confusion this
+session — same-machine doesn't mean faster, the bottleneck is the poll
+interval itself, not transit time), fixed with Panel suggesting a fast
+(3s) interval while something's in-flight or being watched, plus an
+adapter-agnostic WebSocket push layer (Cloudflare Durable Objects / Node
+`ws`) so the instance console updates instantly instead of waiting for
+the next poll tick.
+
+**Tauri decision**: the thin-client design (webview pointed at a
+remote Panel) was judged not to work as wanted after live Windows
+testing and is being pulled out of active scope — rescoped as a v2
+initiative (Panel as a proper local Windows service/webserver the
+desktop app bundles directly), not yet designed. The existing
+`panel/src-tauri/` code is unchanged and still compiles, just no longer
+the intended direction.
+
+Verified: `go build/vet/test`, `svelte-check`, both `ADAPTER` builds
+clean throughout. Two real bugs caught specifically by *live* testing
+rather than type-checking (see CLAUDE.md's new architecture section for
+detail): a cross-module-boundary state bug (`server.mjs` and the
+SvelteKit-bundled route code getting disconnected `Map` instances) and
+an actual auth bypass (`fetch()`'s default redirect-following silently
+defeated the loopback admin-session check for the WebSocket upgrade
+path) — a real unauthenticated WebSocket connected successfully before
+`redirect: 'manual'` was added.
+
+### Key technical decisions (with why)
+
+- **Same-machine Pulse↔Panel is not faster** — the architecture always
+  routes through the fixed heartbeat poll interval regardless of network
+  distance; co-locating them doesn't skip that. The actual lever for
+  perceived latency is the interval itself (now adaptive) or a genuine
+  push channel, not deployment topology.
+- **Java heap/property defaults are per-create-server-submission, not
+  part of `server_definitions`** — a definition pins *what* to install,
+  these are *how it's configured*, deliberately kept as a smaller,
+  separately-reasoned-about change rather than growing the definitions
+  schema too.
+- **Part A (adaptive interval) and Part B (real-time push) were built
+  as one continuous session rather than pausing after A** — despite B
+  being materially riskier (first-ever Durable Object usage in this
+  repo, a new Node production entrypoint, a new runtime dependency) —
+  because the value of B (instant browser updates) meaningfully extends
+  A's win (fast Pulse polling) rather than duplicating it.
+- **Cloudflare's half of the real-time layer is unverified in this
+  environment** — no live account/deploy access — flagged explicitly in
+  the code itself, matching this project's existing tolerance for
+  similar gaps (Tauri before it was verified, the Fabric/Forge
+  installer). A standalone Durable Object spike against a real account
+  should be the first thing that touches Cloudflare here.
+
+### Next 2–3 logical steps
+
+1. **Cloudflare Durable Object spike** — deploy just `InstanceHub` (a
+   trivial echo DO) plus the `worker-entry.ts` wrapper to a real
+   Cloudflare account, confirming the wrapper-export approach actually
+   works against the pinned `adapter-cloudflare`/wrangler versions,
+   before trusting the full real-time feature there.
+2. **Redeploy nimo's Panel to `server.mjs`** — the systemd unit's
+   `ExecStart=` still points at the old `node build/index.js` run
+   command; needs updating once this session's work ships, or the new
+   real-time push layer simply won't function there (WebSocket upgrades
+   silently fail, falls back to polling only — not a hard break, but
+   not the intended behavior either).
+3. Still open from prior sessions: verify Fabric/Forge provisioning
+   against a real Java environment, and run a real restore against
+   nimo's actual backups.
+
+---
+
 ## 2026-07-27 — Tauri desktop shell: first real compile
 
 ### What we finished

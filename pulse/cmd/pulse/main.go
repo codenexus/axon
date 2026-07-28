@@ -76,7 +76,7 @@ func main() {
 	updater.Start(exePath, credential.Dir())
 
 	client := protocol.NewClient(cred.ServerURL)
-	runLoop(client, cred, manager, backupEngine, *configPath, backupsDir, exePath, *interval)
+	runLoop(client, cred, manager, backupEngine, *configPath, backupsDir, exePath, *interval, *interval)
 }
 
 func enroll(serverURL, token string) (*credential.Credential, error) {
@@ -104,7 +104,12 @@ func enroll(serverURL, token string) (*credential.Credential, error) {
 	return cred, nil
 }
 
-func runLoop(client *protocol.Client, cred *credential.Credential, manager *mcserver.Manager, backupEngine *backup.Engine, configPath, backupsDir, exePath string, interval time.Duration) {
+// interval is the current, possibly-fast sleep duration (mutated below
+// whenever Panel suggests a change); baseInterval is the immutable
+// --interval CLI flag value, reported on every heartbeat so Panel's own
+// staleness math never bases a timeout deadline on a temporary fast
+// window.
+func runLoop(client *protocol.Client, cred *credential.Credential, manager *mcserver.Manager, backupEngine *backup.Engine, configPath, backupsDir, exePath string, interval, baseInterval time.Duration) {
 	var pendingResults []protocol.CommandResult
 	// activeJobs tracks create_instance commands still provisioning across
 	// multiple heartbeat cycles — see create_instance.go's package doc.
@@ -131,6 +136,7 @@ func runLoop(client *protocol.Client, cred *credential.Credential, manager *mcse
 			Host:                  inventory.Collect(),
 			Instances:             manager.Statuses(),
 			IntervalSeconds:       int(interval.Seconds()),
+			BaseIntervalSeconds:   int(baseInterval.Seconds()),
 			PendingCommandResults: pendingResults,
 			InProgressCommands:    inProgress,
 		}
@@ -138,11 +144,23 @@ func runLoop(client *protocol.Client, cred *credential.Credential, manager *mcse
 		resp, err := client.Heartbeat(cred.DeviceCredential, req)
 		if err != nil {
 			log.Printf("heartbeat failed: %v", err)
+			// Deliberately no reset to baseInterval here: interval already
+			// holds whatever was last suggested, and retrying fast while
+			// something's actively in-flight/watched is the right call —
+			// don't slow back down just because one heartbeat failed.
 			time.Sleep(interval)
 			continue
 		}
 		pendingResults = nil
 		updater.NotifyCheckIn()
+
+		if resp.NextIntervalSeconds != nil {
+			if *resp.NextIntervalSeconds > 0 {
+				interval = time.Duration(*resp.NextIntervalSeconds) * time.Second
+			} else {
+				log.Printf("ignoring invalid next_interval_seconds %d from Panel", *resp.NextIntervalSeconds)
+			}
+		}
 
 		for _, cmd := range resp.Commands {
 			if cmd.Type == "create_instance" {

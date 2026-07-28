@@ -41,7 +41,7 @@
 		return `${Math.round(seconds / 60)}m ago`;
 	}
 
-	function isOnline(agent: { lastSeenAt: number | null; intervalSeconds: number | null }): boolean {
+	function isOnline(agent: { lastSeenAt: number | null; baseIntervalSeconds: number | null }): boolean {
 		return isAgentOnline(agent, Date.now());
 	}
 

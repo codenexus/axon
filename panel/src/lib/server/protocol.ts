@@ -177,9 +177,15 @@ export interface HeartbeatRequestBody {
 	pulse_version: string;
 	host: HostMetrics;
 	instances: InstanceStatus[] | null;
-	// Agent's configured --interval, so Panel can show a "next heartbeat"
-	// countdown instead of guessing a fixed default.
+	// The interval Pulse is *currently* sleeping for -- may be a
+	// Panel-suggested fast interval, not necessarily the configured
+	// --interval. Used for the "next heartbeat" countdown display.
 	interval_seconds: number;
+	// The immutable --interval CLI flag value, captured once at Pulse
+	// startup. Staleness math (isOnline/failStaleCommands) must key off
+	// this, never interval_seconds -- see HeartbeatRequest.
+	// BaseIntervalSeconds in types.go for why.
+	base_interval_seconds: number;
 	pending_command_results?: CommandResult[] | null;
 	in_progress_commands?: CommandProgress[] | null;
 }
@@ -204,4 +210,10 @@ export interface UpdateInfo {
 export interface HeartbeatResponseBody {
 	commands?: WireCommand[];
 	update?: UpdateInfo;
+	// Suggested interval for Pulse's next sleep -- fast (a few seconds)
+	// while a command is in flight for this agent or an admin is
+	// actively viewing one of its instances, otherwise the agent's own
+	// base_interval_seconds. Always set (never omitted) so a fast->slow
+	// transition is an explicit instruction, not just "no change".
+	next_interval_seconds?: number;
 }

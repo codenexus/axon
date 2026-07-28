@@ -57,10 +57,54 @@
 	// tell an idle tab to start checking. Re-runs (tearing down and
 	// restarting the interval at the new cadence) whenever fastPollNeeded
 	// changes, since $effect re-executes when its reactive dependencies do.
+	//
+	// This is now a slower fallback/safety-net cadence, not the primary
+	// update path — the WebSocket connection below (see realtime/) pushes
+	// an immediate invalidateAll() the moment something actually changes.
+	// Kept, not removed: a v1 WebSocket can silently drop (network blip, a
+	// Cloudflare Durable Object eviction, tab backgrounding) with no
+	// guaranteed reconnect before the fallback's own next tick, so this is
+	// what keeps the page eventually consistent regardless.
 	$effect(() => {
-		const ms = fastPollNeeded ? 1000 : 3000;
+		const ms = fastPollNeeded ? 1000 : 8000;
 		const interval = setInterval(() => invalidateAll(), ms);
 		return () => clearInterval(interval);
+	});
+
+	// Real-time push: an immediate invalidateAll() the moment the
+	// heartbeat route (or this admin's own action) publishes a change on
+	// this instance's channel, instead of waiting for the poll above.
+	// Reconnects with backoff on drop; capped rather than growing forever
+	// since this is a same-origin connection to a service that's either
+	// up or will be soon, not a flaky third party worth backing off from
+	// aggressively.
+	$effect(() => {
+		let socket: WebSocket | undefined;
+		let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+		let backoffMs = 1000;
+		let stopped = false;
+
+		function connect() {
+			if (stopped) return;
+			const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+			socket = new WebSocket(`${scheme}//${location.host}/realtime/${encodeURIComponent(data.instance.id)}`);
+			socket.onopen = () => {
+				backoffMs = 1000;
+			};
+			socket.onmessage = () => invalidateAll();
+			socket.onclose = () => {
+				if (stopped) return;
+				reconnectTimer = setTimeout(connect, backoffMs);
+				backoffMs = Math.min(backoffMs * 2, 15000);
+			};
+		}
+		connect();
+
+		return () => {
+			stopped = true;
+			clearTimeout(reconnectTimer);
+			socket?.close();
+		};
 	});
 
 	// A separate 1s local tick (no network call) just to animate the

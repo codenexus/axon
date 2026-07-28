@@ -4,6 +4,7 @@ import { effectiveInterval } from '../heartbeat';
 import { backupDownloads, backups, backupSchedules, commands, pulseAgents, serverInstances } from './db/schema';
 import type { BackupCommandPayload, RestoreCommandPayload } from './protocol';
 import { randomToken } from './tokens';
+import { getRealtime } from './realtime';
 
 export type CommandType =
 	| 'start_instance'
@@ -23,9 +24,18 @@ export type CommandType =
 	| 'delete_file'
 	| 'run_diagnostic';
 
+// `platform` is optional and, when passed, publishes a 'changed' event on
+// this instance's real-time channel right after queueing -- lets the
+// admin's *own* action (e.g. submitting the console box) reflect
+// instantly, before Pulse ever reports back. Most callers (backups,
+// provisioning, etc.) don't pass it: those don't feed the instance
+// console's real-time channel, and the bigger win (Pulse's own result
+// landing) is already covered by the heartbeat route's own publish calls
+// regardless of whether the queueing action passed platform here.
 export async function queueCommand(
 	db: Db,
-	params: { pulseAgentId: string; instanceId: string; type: CommandType; payload?: unknown }
+	params: { pulseAgentId: string; instanceId: string; type: CommandType; payload?: unknown },
+	platform?: App.Platform
 ): Promise<string> {
 	const id = `cmd_${randomToken(8)}`;
 	await db.insert(commands).values({
@@ -37,6 +47,10 @@ export async function queueCommand(
 		status: 'queued',
 		createdAt: Date.now()
 	});
+	if (platform !== undefined) {
+		const realtime = await getRealtime(platform);
+		await realtime.publish(`${params.pulseAgentId}:${params.instanceId}`, { type: 'changed' });
+	}
 	return id;
 }
 
@@ -204,10 +218,10 @@ export async function failStaleCommands(db: Db, pulseAgentId?: string): Promise<
 
 	const agentIds = [...new Set(sent.map((c) => c.pulseAgentId))];
 	const agents = await db
-		.select({ id: pulseAgents.id, intervalSeconds: pulseAgents.intervalSeconds })
+		.select({ id: pulseAgents.id, baseIntervalSeconds: pulseAgents.baseIntervalSeconds })
 		.from(pulseAgents)
 		.where(inArray(pulseAgents.id, agentIds));
-	const intervalByAgent = new Map(agents.map((a) => [a.id, a.intervalSeconds]));
+	const intervalByAgent = new Map(agents.map((a) => [a.id, a.baseIntervalSeconds]));
 
 	for (const cmd of sent) {
 		if (!cmd.sentAt) continue;

@@ -31,7 +31,15 @@ export const pulseAgents = sqliteTable('pulse_agents', {
 	deviceCredentialHash: text('device_credential_hash').notNull(),
 	pulseVersion: text('pulse_version').notNull(),
 	lastSeenAt: integer('last_seen_at'),
+	// The interval Pulse is *currently* sleeping for -- may be a
+	// Panel-suggested fast interval, not the configured --interval. Only
+	// for the dashboard's "next heartbeat" countdown display.
 	intervalSeconds: integer('interval_seconds'),
+	// The immutable --interval CLI flag value. Staleness math
+	// (isOnline/failStaleCommands) must key off this, never
+	// intervalSeconds -- see HeartbeatRequest.BaseIntervalSeconds in
+	// pulse/internal/protocol/types.go for why.
+	baseIntervalSeconds: integer('base_interval_seconds'),
 	cpuUsagePercent: real('cpu_usage_percent'),
 	cpuCores: integer('cpu_cores'),
 	ramTotalBytes: integer('ram_total_bytes'),
@@ -67,7 +75,12 @@ export const serverInstances = sqliteTable('server_instances', {
 	updatedAt: integer('updated_at').notNull(),
 	// Only populated for instances Pulse itself provisioned via
 	// create_instance — legacy hand-configured instances never report one.
-	port: integer('port')
+	port: integer('port'),
+	// Stamped by the instance detail page's load() on every SSR reload
+	// while an admin has that page open -- the presence signal the
+	// heartbeat route uses to suggest a fast interval to Pulse. Null means
+	// "never viewed" or stale enough to not matter.
+	lastViewedAt: integer('last_viewed_at')
 });
 
 export const commands = sqliteTable('commands', {

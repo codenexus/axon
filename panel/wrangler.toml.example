@@ -1,7 +1,13 @@
 # Copy to wrangler.toml (gitignored) and fill in your own values before
 # deploying the hosted/Worker target.
 name = "axon-panel"
-main = ".svelte-kit/cloudflare/_worker.js"
+# worker-entry.ts wraps the generated _worker.js (was main= directly
+# before) to also export the InstanceHub Durable Object -- see that
+# file's comment. UNVERIFIED IN THIS ENVIRONMENT, no live Cloudflare
+# deploy access; confirm this wrapper approach with a standalone spike
+# before trusting it in production (see src/lib/server/realtime/
+# instance-hub-do.ts's header comment).
+main = "worker-entry.ts"
 compatibility_date = "2026-07-09"
 compatibility_flags = ["nodejs_compat"]
 
@@ -14,3 +20,14 @@ binding = "DB"
 database_name = "axon"
 database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
 migrations_dir = "../migrations"
+
+# Real-time push layer for the instance console page (see
+# src/lib/server/realtime/) -- one Durable Object instance per open
+# instance-console channel.
+[[durable_objects.bindings]]
+name = "INSTANCE_HUB"
+class_name = "InstanceHub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["InstanceHub"]

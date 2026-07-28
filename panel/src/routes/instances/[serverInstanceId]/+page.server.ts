@@ -14,6 +14,17 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 		.where(eq(serverInstances.id, params.serverInstanceId));
 	if (!instance) throw error(404, 'instance not found');
 
+	// The heartbeat route's presence signal for suggesting a fast interval
+	// to Pulse -- stamped on every SSR reload while this page is open,
+	// which the existing fastPollNeeded-driven poll already does every
+	// 1-3s, so this needs no new client code of its own. Deliberately not
+	// stamped on the dashboard's own load -- dashboard-level staleness is
+	// fine, only the single-instance console view needs the fast path.
+	await locals.db
+		.update(serverInstances)
+		.set({ lastViewedAt: Date.now() })
+		.where(eq(serverInstances.id, params.serverInstanceId));
+
 	await pruneExpiredDownloads(locals.db, instance.pulseAgentId);
 	await failStaleCommands(locals.db, instance.pulseAgentId);
 
@@ -41,7 +52,7 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 	// For the "next check-in ~Ns" countdown next to pending operations —
 	// pending backups only resolve on this agent's next heartbeat.
 	const [agent] = await locals.db
-		.select({ lastSeenAt: pulseAgents.lastSeenAt, intervalSeconds: pulseAgents.intervalSeconds })
+		.select({ lastSeenAt: pulseAgents.lastSeenAt, baseIntervalSeconds: pulseAgents.baseIntervalSeconds })
 		.from(pulseAgents)
 		.where(eq(pulseAgents.id, instance.pulseAgentId));
 
@@ -110,14 +121,19 @@ function parsePositiveIntOrNull(raw: FormDataEntryValue | null): number | null |
 async function queueConsoleCommand(
 	db: Db,
 	instance: typeof serverInstances.$inferSelect,
-	command: string
+	command: string,
+	platform: App.Platform | undefined
 ): Promise<void> {
-	await queueCommand(db, {
-		pulseAgentId: instance.pulseAgentId,
-		instanceId: instance.instanceId,
-		type: 'console_command',
-		payload: { command }
-	});
+	await queueCommand(
+		db,
+		{
+			pulseAgentId: instance.pulseAgentId,
+			instanceId: instance.instanceId,
+			type: 'console_command',
+			payload: { command }
+		},
+		platform
+	);
 }
 
 export const actions: Actions = {
@@ -340,7 +356,7 @@ export const actions: Actions = {
 		return { ok: true };
 	},
 
-	runConsoleCommand: async ({ request, params, locals }) => {
+	runConsoleCommand: async ({ request, params, locals, platform }) => {
 		const form = await request.formData();
 		const command = String(form.get('command') ?? '').trim();
 		if (!command) return fail(400, { error: 'enter a command' });
@@ -351,33 +367,41 @@ export const actions: Actions = {
 			.where(eq(serverInstances.id, params.serverInstanceId));
 		if (!instance) return fail(404, { error: 'instance not found' });
 
-		await queueCommand(locals.db, {
-			pulseAgentId: instance.pulseAgentId,
-			instanceId: instance.instanceId,
-			type: 'console_command',
-			payload: { command }
-		});
+		await queueCommand(
+			locals.db,
+			{
+				pulseAgentId: instance.pulseAgentId,
+				instanceId: instance.instanceId,
+				type: 'console_command',
+				payload: { command }
+			},
+			platform
+		);
 
 		return { ok: true };
 	},
 
-	loadProperties: async ({ params, locals }) => {
+	loadProperties: async ({ params, locals, platform }) => {
 		const [instance] = await locals.db
 			.select()
 			.from(serverInstances)
 			.where(eq(serverInstances.id, params.serverInstanceId));
 		if (!instance) return fail(404, { error: 'instance not found' });
 
-		await queueCommand(locals.db, {
-			pulseAgentId: instance.pulseAgentId,
-			instanceId: instance.instanceId,
-			type: 'read_properties'
-		});
+		await queueCommand(
+			locals.db,
+			{
+				pulseAgentId: instance.pulseAgentId,
+				instanceId: instance.instanceId,
+				type: 'read_properties'
+			},
+			platform
+		);
 
 		return { ok: true };
 	},
 
-	saveProperties: async ({ request, params, locals }) => {
+	saveProperties: async ({ request, params, locals, platform }) => {
 		const form = await request.formData();
 		const content = form.get('content');
 		if (content === null) return fail(400, { error: 'missing content' });
@@ -388,12 +412,16 @@ export const actions: Actions = {
 			.where(eq(serverInstances.id, params.serverInstanceId));
 		if (!instance) return fail(404, { error: 'instance not found' });
 
-		await queueCommand(locals.db, {
-			pulseAgentId: instance.pulseAgentId,
-			instanceId: instance.instanceId,
-			type: 'write_properties',
-			payload: { content: String(content) }
-		});
+		await queueCommand(
+			locals.db,
+			{
+				pulseAgentId: instance.pulseAgentId,
+				instanceId: instance.instanceId,
+				type: 'write_properties',
+				payload: { content: String(content) }
+			},
+			platform
+		);
 
 		return { ok: true };
 	},
@@ -419,7 +447,7 @@ export const actions: Actions = {
 		throw redirect(303, '/');
 	},
 
-	whitelistAdd: async ({ request, params, locals }) => {
+	whitelistAdd: async ({ request, params, locals, platform }) => {
 		const form = await request.formData();
 		const username = String(form.get('username') ?? '').trim();
 		if (!username) return fail(400, { error: 'enter a username' });
@@ -431,11 +459,11 @@ export const actions: Actions = {
 			.where(eq(serverInstances.id, params.serverInstanceId));
 		if (!instance) return fail(404, { error: 'instance not found' });
 
-		await queueConsoleCommand(locals.db, instance, `whitelist add ${username}`);
+		await queueConsoleCommand(locals.db, instance, `whitelist add ${username}`, platform);
 		return { ok: true };
 	},
 
-	whitelistRemove: async ({ request, params, locals }) => {
+	whitelistRemove: async ({ request, params, locals, platform }) => {
 		const form = await request.formData();
 		const username = String(form.get('username') ?? '').trim();
 		if (!username) return fail(400, { error: 'enter a username' });
@@ -447,44 +475,44 @@ export const actions: Actions = {
 			.where(eq(serverInstances.id, params.serverInstanceId));
 		if (!instance) return fail(404, { error: 'instance not found' });
 
-		await queueConsoleCommand(locals.db, instance, `whitelist remove ${username}`);
+		await queueConsoleCommand(locals.db, instance, `whitelist remove ${username}`, platform);
 		return { ok: true };
 	},
 
-	whitelistList: async ({ params, locals }) => {
+	whitelistList: async ({ params, locals, platform }) => {
 		const [instance] = await locals.db
 			.select()
 			.from(serverInstances)
 			.where(eq(serverInstances.id, params.serverInstanceId));
 		if (!instance) return fail(404, { error: 'instance not found' });
 
-		await queueConsoleCommand(locals.db, instance, 'whitelist list');
+		await queueConsoleCommand(locals.db, instance, 'whitelist list', platform);
 		return { ok: true };
 	},
 
-	whitelistOn: async ({ params, locals }) => {
+	whitelistOn: async ({ params, locals, platform }) => {
 		const [instance] = await locals.db
 			.select()
 			.from(serverInstances)
 			.where(eq(serverInstances.id, params.serverInstanceId));
 		if (!instance) return fail(404, { error: 'instance not found' });
 
-		await queueConsoleCommand(locals.db, instance, 'whitelist on');
+		await queueConsoleCommand(locals.db, instance, 'whitelist on', platform);
 		return { ok: true };
 	},
 
-	whitelistOff: async ({ params, locals }) => {
+	whitelistOff: async ({ params, locals, platform }) => {
 		const [instance] = await locals.db
 			.select()
 			.from(serverInstances)
 			.where(eq(serverInstances.id, params.serverInstanceId));
 		if (!instance) return fail(404, { error: 'instance not found' });
 
-		await queueConsoleCommand(locals.db, instance, 'whitelist off');
+		await queueConsoleCommand(locals.db, instance, 'whitelist off', platform);
 		return { ok: true };
 	},
 
-	opPlayer: async ({ request, params, locals }) => {
+	opPlayer: async ({ request, params, locals, platform }) => {
 		const form = await request.formData();
 		const username = String(form.get('username') ?? '').trim();
 		if (!username) return fail(400, { error: 'enter a username' });
@@ -496,11 +524,11 @@ export const actions: Actions = {
 			.where(eq(serverInstances.id, params.serverInstanceId));
 		if (!instance) return fail(404, { error: 'instance not found' });
 
-		await queueConsoleCommand(locals.db, instance, `op ${username}`);
+		await queueConsoleCommand(locals.db, instance, `op ${username}`, platform);
 		return { ok: true };
 	},
 
-	deopPlayer: async ({ request, params, locals }) => {
+	deopPlayer: async ({ request, params, locals, platform }) => {
 		const form = await request.formData();
 		const username = String(form.get('username') ?? '').trim();
 		if (!username) return fail(400, { error: 'enter a username' });
@@ -512,44 +540,11 @@ export const actions: Actions = {
 			.where(eq(serverInstances.id, params.serverInstanceId));
 		if (!instance) return fail(404, { error: 'instance not found' });
 
-		await queueConsoleCommand(locals.db, instance, `deop ${username}`);
+		await queueConsoleCommand(locals.db, instance, `deop ${username}`, platform);
 		return { ok: true };
 	},
 
-	banPlayer: async ({ request, params, locals }) => {
-		const form = await request.formData();
-		const username = String(form.get('username') ?? '').trim();
-		if (!username) return fail(400, { error: 'enter a username' });
-		if (/\s/.test(username)) return fail(400, { error: 'username cannot contain spaces' });
-		const reason = String(form.get('reason') ?? '').trim();
-
-		const [instance] = await locals.db
-			.select()
-			.from(serverInstances)
-			.where(eq(serverInstances.id, params.serverInstanceId));
-		if (!instance) return fail(404, { error: 'instance not found' });
-
-		await queueConsoleCommand(locals.db, instance, reason ? `ban ${username} ${reason}` : `ban ${username}`);
-		return { ok: true };
-	},
-
-	pardonPlayer: async ({ request, params, locals }) => {
-		const form = await request.formData();
-		const username = String(form.get('username') ?? '').trim();
-		if (!username) return fail(400, { error: 'enter a username' });
-		if (/\s/.test(username)) return fail(400, { error: 'username cannot contain spaces' });
-
-		const [instance] = await locals.db
-			.select()
-			.from(serverInstances)
-			.where(eq(serverInstances.id, params.serverInstanceId));
-		if (!instance) return fail(404, { error: 'instance not found' });
-
-		await queueConsoleCommand(locals.db, instance, `pardon ${username}`);
-		return { ok: true };
-	},
-
-	kickPlayer: async ({ request, params, locals }) => {
+	banPlayer: async ({ request, params, locals, platform }) => {
 		const form = await request.formData();
 		const username = String(form.get('username') ?? '').trim();
 		if (!username) return fail(400, { error: 'enter a username' });
@@ -562,18 +557,51 @@ export const actions: Actions = {
 			.where(eq(serverInstances.id, params.serverInstanceId));
 		if (!instance) return fail(404, { error: 'instance not found' });
 
-		await queueConsoleCommand(locals.db, instance, reason ? `kick ${username} ${reason}` : `kick ${username}`);
+		await queueConsoleCommand(locals.db, instance, reason ? `ban ${username} ${reason}` : `ban ${username}`, platform);
 		return { ok: true };
 	},
 
-	banList: async ({ params, locals }) => {
+	pardonPlayer: async ({ request, params, locals, platform }) => {
+		const form = await request.formData();
+		const username = String(form.get('username') ?? '').trim();
+		if (!username) return fail(400, { error: 'enter a username' });
+		if (/\s/.test(username)) return fail(400, { error: 'username cannot contain spaces' });
+
 		const [instance] = await locals.db
 			.select()
 			.from(serverInstances)
 			.where(eq(serverInstances.id, params.serverInstanceId));
 		if (!instance) return fail(404, { error: 'instance not found' });
 
-		await queueConsoleCommand(locals.db, instance, 'banlist');
+		await queueConsoleCommand(locals.db, instance, `pardon ${username}`, platform);
+		return { ok: true };
+	},
+
+	kickPlayer: async ({ request, params, locals, platform }) => {
+		const form = await request.formData();
+		const username = String(form.get('username') ?? '').trim();
+		if (!username) return fail(400, { error: 'enter a username' });
+		if (/\s/.test(username)) return fail(400, { error: 'username cannot contain spaces' });
+		const reason = String(form.get('reason') ?? '').trim();
+
+		const [instance] = await locals.db
+			.select()
+			.from(serverInstances)
+			.where(eq(serverInstances.id, params.serverInstanceId));
+		if (!instance) return fail(404, { error: 'instance not found' });
+
+		await queueConsoleCommand(locals.db, instance, reason ? `kick ${username} ${reason}` : `kick ${username}`, platform);
+		return { ok: true };
+	},
+
+	banList: async ({ params, locals, platform }) => {
+		const [instance] = await locals.db
+			.select()
+			.from(serverInstances)
+			.where(eq(serverInstances.id, params.serverInstanceId));
+		if (!instance) return fail(404, { error: 'instance not found' });
+
+		await queueConsoleCommand(locals.db, instance, 'banlist', platform);
 		return { ok: true };
 	}
 };

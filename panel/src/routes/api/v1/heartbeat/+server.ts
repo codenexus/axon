@@ -1,5 +1,5 @@
 import { json, error } from '@sveltejs/kit';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray } from 'drizzle-orm';
 import type { RequestHandler } from './$types';
 import { commands, pulseAgents, pulseReleases, serverInstances } from '$lib/server/db/schema';
 import { failStaleCommands, resolveCommandOutcome } from '$lib/server/commands';
@@ -8,6 +8,7 @@ import { pruneExpiredFileUploads } from '$lib/server/fileUploads';
 import { runSchedulesForAgent } from '$lib/server/backupSchedules';
 import { bearerToken } from '$lib/server/http';
 import { sha256Hex } from '$lib/server/tokens';
+import { getRealtime } from '$lib/server/realtime';
 import type {
 	HeartbeatRequestBody,
 	HeartbeatResponseBody,
@@ -15,9 +16,24 @@ import type {
 	WireCommand
 } from '$lib/server/protocol';
 
-export const POST: RequestHandler = async ({ request, locals }) => {
+// Panel suggests this while a command is in flight for the agent or an
+// admin is actively viewing one of its instance pages, so console
+// commands/results feel close to real-time instead of waiting up to
+// ~2x the agent's normal --interval for a round trip. Falls back to the
+// agent's own base_interval_seconds otherwise. Agent-scoped, not
+// instance-scoped -- one poll loop per Pulse process, so watching any
+// instance on a multi-instance host makes the whole agent heartbeat
+// fast as a side effect. Expected, not a bug.
+const FAST_INTERVAL_SECONDS = 3;
+// Comfortably exceeds the instance page's own 1-3s baseline poll (which
+// is what actually stamps last_viewed_at), with slack for tab
+// throttling/GC jitter, so presence doesn't flicker off between polls.
+const PRESENCE_WINDOW_MS = 15_000;
+
+export const POST: RequestHandler = async ({ request, locals, platform }) => {
 	const token = bearerToken(request);
 	if (!token) throw error(401, 'missing device credential');
+	const realtime = await getRealtime(platform);
 
 	const [agent] = await locals.db
 		.select()
@@ -33,6 +49,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 		.set({
 			lastSeenAt: now,
 			intervalSeconds: body.interval_seconds,
+			baseIntervalSeconds: body.base_interval_seconds,
 			pulseVersion: body.pulse_version,
 			cpuUsagePercent: body.host?.cpu_usage_percent,
 			cpuCores: body.host?.cpu_cores,
@@ -63,6 +80,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 			.insert(serverInstances)
 			.values(values)
 			.onConflictDoUpdate({ target: serverInstances.id, set: values });
+		await realtime.publish(rowId, { type: 'changed' });
 	}
 
 	for (const result of body.pending_command_results ?? []) {
@@ -84,6 +102,11 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 			},
 			now
 		);
+		// The actual latency-closing moment for the adaptive interval's
+		// whole purpose: a console command's result just landed, push it to
+		// any open tab immediately instead of waiting for that tab's own
+		// poll to notice.
+		await realtime.publish(`${agent.id}:${cmd.instanceId}`, { type: 'changed' });
 	}
 
 	for (const progress of body.in_progress_commands ?? []) {
@@ -91,10 +114,16 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 		// pending_command_results guard above — never touch an
 		// already-terminal row (e.g. one the stale-command sweep just
 		// failed on a previous heartbeat, racing a late progress report).
+		const [cmd] = await locals.db
+			.select({ instanceId: commands.instanceId })
+			.from(commands)
+			.where(and(eq(commands.id, progress.command_id), eq(commands.status, 'sent')));
+		if (!cmd) continue;
 		await locals.db
 			.update(commands)
 			.set({ progressPhase: progress.phase })
 			.where(and(eq(commands.id, progress.command_id), eq(commands.status, 'sent')));
+		await realtime.publish(`${agent.id}:${cmd.instanceId}`, { type: 'changed' });
 	}
 
 	// Opportunistic work, all piggybacked on this agent's regular heartbeat
@@ -151,6 +180,22 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 		};
 	}
 
-	const response: HeartbeatResponseBody = { commands: wireCommands, update };
+	// Queried after the queued->sent update above so a command just sent
+	// this heartbeat already counts as in-flight, not just ones sent on a
+	// previous cycle still awaiting a result.
+	const inFlight = await locals.db
+		.select({ id: commands.id })
+		.from(commands)
+		.where(and(eq(commands.pulseAgentId, agent.id), inArray(commands.status, ['queued', 'sent'])))
+		.limit(1);
+	const watched = await locals.db
+		.select({ id: serverInstances.id })
+		.from(serverInstances)
+		.where(and(eq(serverInstances.pulseAgentId, agent.id), gt(serverInstances.lastViewedAt, now - PRESENCE_WINDOW_MS)))
+		.limit(1);
+	const nextIntervalSeconds =
+		inFlight.length > 0 || watched.length > 0 ? FAST_INTERVAL_SECONDS : body.base_interval_seconds || 30;
+
+	const response: HeartbeatResponseBody = { commands: wireCommands, update, next_interval_seconds: nextIntervalSeconds };
 	return json(response);
 };

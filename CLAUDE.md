@@ -117,13 +117,17 @@ The wire contract lives in two parallel type definitions kept in sync by
 hand, not by shared schema/codegen: `pulse/internal/protocol/types.go` (Go)
 and `panel/src/lib/server/protocol.ts` (TypeScript).
 
-- **Heartbeat** (`POST /api/v1/heartbeat`, Pulse → Panel, ~30–60s): host
-  metrics + per-instance status array + the agent's own `interval_seconds`
-  (so Panel can compute a "next heartbeat in ~Ns" countdown instead of
-  guessing a fixed default). Panel upserts `server_instances` rows and
-  returns any queued commands, marking them `sent`, plus an optional
-  `update` field (see "Self-update" below) whenever a newer Pulse release
-  is published for this agent's os/arch.
+- **Heartbeat** (`POST /api/v1/heartbeat`, Pulse → Panel, interval varies —
+  see "Adaptive heartbeat interval" below): host metrics + per-instance
+  status array + the agent's own `interval_seconds` (its *current*,
+  possibly-fast interval) and `base_interval_seconds` (the immutable
+  `--interval` CLI flag) so Panel can compute a "next heartbeat in ~Ns"
+  countdown instead of guessing a fixed default. Panel upserts
+  `server_instances` rows and returns any queued commands, marking them
+  `sent`, plus an optional `update` field (see "Self-update" below)
+  whenever a newer Pulse release is published for this agent's os/arch,
+  plus `next_interval_seconds` (always set) suggesting what interval Pulse
+  should use next.
 - **Command results** are piggybacked onto the *next* heartbeat
   (`pending_command_results`) rather than pushed immediately — simplicity
   over latency, matches Beacon precedent. **Real consequence**: if Pulse
@@ -144,6 +148,138 @@ and `panel/src/lib/server/protocol.ts` (TypeScript).
 - **Backup file transfer** (`POST /api/v1/backups/{id}/upload`, Pulse →
   Panel, on-demand): a separate, non-JSON, non-heartbeat call — see
   "Backups" below.
+
+### Adaptive heartbeat interval + real-time push layer
+
+Two-part fix for a real, previously-unaddressed latency complaint: a
+console command sent from the instance page only reached Pulse on its
+*next* heartbeat, and the result only came back on the heartbeat *after
+that* — up to ~2x Pulse's `--interval` (default 30s) round-trip,
+independent of network distance (same-machine, LAN, or across the
+internet all cost the same, since Pulse always polls on a fixed timer
+regardless of locality — a real point of confusion this session,
+resolved by explaining the architecture rather than changing it).
+
+**Part A — adaptive interval (agent-scoped, not instance-scoped)**:
+Panel suggests a fast interval (3s) via `HeartbeatResponse.
+NextIntervalSeconds` (`next_interval_seconds`, always set, a pointer on
+the Go side so an older Panel that never sets it is distinguishable from
+a deliberate instruction) whenever there's a command `queued`/`sent` for
+the agent, or `server_instances.lastViewedAt` shows an admin loaded that
+agent's instance page within the last 15s (`PRESENCE_WINDOW_MS`) —
+falling back to the agent's own `base_interval_seconds` otherwise. Pulse
+applies it by mutating its local `interval` var in `runLoop`
+(`pulse/cmd/pulse/main.go`); the CLI-flag value itself is captured once
+at startup into a separate, never-mutated `baseInterval` and reported
+every heartbeat as `base_interval_seconds`, specifically so a temporary
+fast window can never change what "stale"/"offline" means. **This
+distinction is load-bearing**: `isOnline()`/`heartbeatProgress()`/
+`nextHeartbeatLabel()` (`panel/src/lib/heartbeat.ts`) and
+`failStaleCommands()` (`panel/src/lib/server/commands.ts`) all compute
+their deadlines from `baseIntervalSeconds`, never the ephemeral
+`intervalSeconds` — using the fast value there would shrink the "3
+missed heartbeats" deadline to ~9s and spuriously fail/offline-flip
+things during ordinary jitter while a fast burst is in progress. Verified
+live in an isolated sandbox (throwaway `sh -c "sleep N"` Pulse instance):
+idle heartbeats hold at the base interval; queueing a command flips the
+*next* heartbeat's response to `next_interval_seconds: 3` and subsequent
+heartbeats land ~3s apart until the command resolves, then decay back;
+presence alone (no command) does the same and decays once the 15s window
+expires; a manually-inserted 10s-old `sent` command survives a
+simultaneous fast burst untouched, confirming the base-interval-only
+staleness math actually holds under load, not just in isolation.
+
+**Part B — adapter-agnostic real-time push** (`panel/src/lib/server/
+realtime/`): replaces (well, supplements — see below) the instance
+page's poll with an actual push channel, so a change lands in the
+browser the instant it happens rather than waiting for that tab's own
+next poll tick. One shared interface (`index.ts`: `publish(channel,
+event)` / `subscriberCount(channel)`, `channel` = the same
+`pulseAgentId:instanceId` composite id `server_instances.id` already
+uses), two backends chosen at the exact same runtime branch point the DB
+layer already uses (`platform?.env?.DB` in `db/index.ts`) — Cloudflare
+Durable Objects (`cloudflare.ts` + `instance-hub-do.ts`, one DO instance
+*is* one channel via `idFromName`) or a plain in-process Node
+`Map<channel, Set<WebSocket>>` (`node.ts`, `ws` package — a genuinely new
+runtime dependency, this project was dependency-light before). There's
+no raw stdout/console tailing anywhere in Axon — the console is a
+request/response transcript built from `commands` rows — so the pushed
+payload is deliberately trivial (`{type:'changed'}`, "something changed,
+go reload"), not a data-bearing stream; this keeps the realtime layer
+from duplicating `+page.server.ts`'s own query logic.
+
+**The connection-*accept* half (terminating a raw WebSocket upgrade)
+genuinely cannot be unified the way publish/subscriberCount are** —
+SvelteKit exposes no raw socket the same way on Node vs. Workers. Real
+architectural asymmetry, not a modeling shortcut:
+- **Cloudflare**: `/realtime/[serverInstanceId]/+server.ts`'s `GET`
+  forwards the request straight to the channel's Durable Object
+  (`ns.get(id).fetch(request)`), which returns the real `101` response
+  itself. (`@cloudflare/workers-types`' own `Request`/`Response` types
+  are structurally near-identical but nominally distinct from the DOM lib
+  types SvelteKit's `RequestHandler` expects — bridged with a cast at
+  that one boundary, not threaded further.)
+- **Node**: the real upgrade happens entirely outside SvelteKit, in a new
+  `panel/server.mjs` production entrypoint (replacing `node
+  build/index.js` — see "Panel: one codebase, three adapters" below) via
+  the raw `http.Server`'s `'upgrade'` event, which never reaches
+  `hooks.server.ts` or any SvelteKit route at all. The dev-mode
+  equivalent is a small Vite plugin in `vite.config.ts`
+  (`configureServer` → `server.httpServer.on('upgrade', ...)`), so this
+  is actually developable under `pnpm run dev`, not just in a production
+  build.
+
+**Two real bugs caught by testing this live, not just type-checking it**
+(a `ws`-based Node test client, two browser-tab-equivalent WebSocket
+connections against a real `server.mjs` instance):
+- **Cross-module-boundary state**: `server.mjs` runs as plain Node,
+  outside Vite's bundling of `realtime/node.ts` — importing that TS file
+  directly from `server.mjs` would produce a *second*, disconnected
+  module instance with its own empty `channels` Map, meaning a socket
+  accepted in `server.mjs` would never be visible to `publish()` calls
+  made from the SvelteKit-bundled route code. Fixed by anchoring the
+  Map on `globalThis` (`__axonRealtimeChannels`) instead of a
+  module-scoped `const`, in both `node.ts` and `server.mjs` (and the dev
+  plugin) — genuinely the same object within one OS process regardless
+  of how each side's code got loaded, not a workaround.
+- **Auth bypass, caught live**: raw `'upgrade'` events bypass
+  `hooks.server.ts`'s admin-session gate entirely on Node (that pipeline
+  never runs for an upgrade request), so `server.mjs`/the dev plugin make
+  an internal loopback `GET` to `/realtime/[id]` first, forwarding the
+  browser's original cookies, to reuse the real session check before
+  accepting the upgrade — reaching the route at all (a 2xx) means it
+  passed. **First attempt was actually broken**: `fetch()` follows
+  redirects by default, so an unauthenticated loopback request silently
+  followed `hooks.server.ts`'s `303` to `/login`, got that page's own
+  `200 OK`, and the check saw `.ok === true` for a request that should
+  have been rejected — a real unauthenticated WebSocket connected
+  successfully in testing before `redirect: 'manual'` was added to the
+  loopback `fetch()` call. Re-tested after the fix: an unauthenticated
+  connection now gets destroyed immediately, an authenticated one
+  connects and receives pushed events normally.
+
+**Coexists with, doesn't replace, the instance page's poll** — dropped
+from a 3s baseline to 8s (still 1s while something's known in-flight),
+not removed: a v1 WebSocket can silently drop (network blip, a Durable
+Object eviction, tab backgrounding) with no guaranteed reconnect before
+the next poll tick, so the poll stays the eventual-consistency safety
+net. The client reconnects with capped exponential backoff (1s→15s) on
+`onclose`.
+
+**Cloudflare half is unverified in this environment** — no live account/
+deploy access here, flagged explicitly in `cloudflare.ts`/
+`instance-hub-do.ts`'s own header comments, same honesty this project
+already applies to Tauri live-run (before it was verified) and the
+Fabric/Forge installer. In particular, `wrangler.toml.example`'s `main`
+now points at a hand-written `panel/worker-entry.ts` wrapper (re-exporting
+both the generated `_worker.js` default export and the `InstanceHub`
+Durable Object class) instead of the generated file directly, since
+`adapter-cloudflare` has no established path for exporting an additional
+named class from its own generated worker module — whether this wrapper
+approach actually works against the pinned adapter/wrangler versions has
+never been confirmed by a real deploy. A standalone spike (just the DO,
+deployed to a real account) should be the first thing that touches
+Cloudflare here, before trusting the full feature in production.
 
 ### Pulse always runs, even same-machine
 
@@ -472,6 +608,41 @@ No `ConfirmModal` on delete — matches the existing convention that only
 genuinely high-blast-radius actions (restore, recursive file delete,
 delete-instance) get that treatment; deleting a template has zero effect
 on any running server.
+
+### Configurable Java heap size + server.properties defaults at creation
+
+Closes two real, previously-hardcoded gaps in provisioning: Java heap
+size was a fixed `provision.DefaultJavaHeapMB = 2048` constant with zero
+admin control anywhere, and `server.properties` only ever got
+`server-port` written at creation time (everything else was left for the
+server software's own first-launch defaults to silently fill in later).
+
+**Wire**: `CreateInstanceCommandPayload` (both `types.go` and
+`protocol.ts`) gained `java_heap_mb` (java only, 0/omitted falls back to
+`DefaultJavaHeapMB`) and `gamemode`/`difficulty`/`max_players`/`motd`,
+all optional — an omitted value means "don't write this key," leaving
+the software's own default untouched, exactly like every other key this
+payload doesn't mention. `provision.Configure()` writes whichever of
+these the payload sets via a new `writePropertyOverrides()` helper,
+before the per-platform launch-command switch. `gamemode`/`difficulty`/
+`max-players` share the same server.properties key on both editions;
+`motd` is edition-mapped by Pulse itself — Bedrock has no `motd` key, its
+equivalent display-name field is `server-name` — so Panel only ever has
+to think in terms of one concept.
+
+**Panel**: the create-server form gained a "Server settings" section,
+always shown regardless of whether a saved definition supplied the
+software/version choice — **deliberately not part of `server_definitions`
+itself**: a definition pins *what* to install, these are *how it's
+configured*, chosen fresh at every creation. Pre-filled with the same
+defaults the server software would pick on its own first launch
+(survival/easy/20 players/"A Minecraft Server"), so they're visible and
+editable upfront instead of hidden until an admin goes looking in the
+properties editor after the fact. Gamemode options are edition-aware
+(Bedrock's server.properties has no valid `spectator` value — the form
+hides that option once the edition resolves to bedrock, and the create
+action rejects it server-side too as defense in depth against a
+hand-crafted request).
 
 ### Deleting a provisioned instance
 
@@ -878,6 +1049,18 @@ lookup already declared in `capabilities/default.json`. No other
 API-shape mismatches found — the rest of the scaffold (menu, window
 management, config persistence) compiled as originally written.
 
+**Update, later session**: after live testing on Windows, this
+thin-client design (webview pointed at a remotely-hosted Panel) was
+judged not to work as wanted in practice and is being pulled out of
+active scope — rescoped as a v2 initiative: Panel running as a proper
+local Windows service/webserver the desktop app bundles and manages
+directly, closer to the original pre-thin-client sidecar concept this
+section describes above as "deliberately replaced." That v2 rework
+hasn't been designed yet (a separate planning pass, not sketched here);
+the code in `panel/src-tauri/` as described above is unchanged and still
+compiles, just no longer the intended direction — don't extend it
+further without confirming this decision hasn't been revisited.
+
 The DB layer (`panel/src/lib/server/db/index.ts`) branches on
 `platform?.env?.DB`: if present (Cloudflare), uses `drizzle-orm/d1`
 directly; otherwise (Node/Tauri/local dev) lazily opens a Node built-in
@@ -894,6 +1077,19 @@ repo-root `migrations/` directory — one source of truth shared by D1 and
 the local sqlite bootstrap. **A long-running local dev server only
 applies migrations once, at process startup** — after adding a migration,
 restart the dev server, not just save the file.
+
+The real-time push layer (`panel/src/lib/server/realtime/`, see
+"Adaptive heartbeat interval + real-time push layer" above) mirrors this
+exact same `platform?.env?.DB`-branch-then-shared-interface shape for a
+second Cloudflare-specific primitive (Durable Objects) — worth reaching
+for again the next time a Cloudflare-only capability needs a Node-side
+equivalent, rather than inventing a new abstraction pattern. Its Node
+implementation needs a custom production entrypoint,
+`panel/server.mjs` (**not** the adapter-generated `build/index.js` — run
+`node server.mjs` instead, see `panel/README.md`), since raw WebSocket
+upgrade handling needs the underlying `http.Server`'s `'upgrade'` event,
+which neither SvelteKit route handlers nor `build/index.js`'s
+self-contained server expose a hook for.
 
 ### Command layers (conceptually distinct — don't collapse them)
 
@@ -1083,22 +1279,30 @@ see `PROJECT_LOG.md` for session-by-session detail on each:
   clean, including Windows/macOS cross-compiles.
 - **Panel**: single-admin auth; enrollment token generation; dashboard
   with online/offline status + accurate in-flight badges
-  (starting/stopping/restarting/deleting/backing-up/restoring); a
-  per-instance page with backups, scheduling/retention, an RCON console
-  transcript, whitelist/op/ban moderation forms, a properties editor, and
-  a "Danger Zone" delete card; a file browser; a themed confirm modal; 3
-  theme palettes; an agent detail page with port-range/instances-dir
-  config, a create-server flow (Java software choice of
-  vanilla/Paper/Fabric/Forge, Bedrock vanilla-only, with reusable saved
-  server definitions pinning the same choice), host stats
-  (CPU/RAM/disk/uptime), and an allowlisted diagnostic-command runner; a
-  "Publish Pulse release" form + "→ vNEW available" note for self-update.
-  `svelte-check` clean; both
-  `ADAPTER=node` and `ADAPTER=cloudflare` builds pass. A Tauri desktop
-  thin client (`panel/src-tauri/`) is **compiled and live-run-verified**
-  (WSL2 Ubuntu 24.04, real window registered with the WSLg compositor) —
-  see "Panel: one codebase, three adapters" above for the one build.rs
-  fix this took.
+  (starting/stopping/restarting/deleting/backing-up/restoring), player
+  count/uptime shown per instance row, and a small icon marking which
+  rows are actual Minecraft servers vs. the node/agent card they sit
+  inside; a per-instance page with backups, scheduling/retention, an
+  RCON console transcript, whitelist/op/ban moderation forms, a
+  properties editor, and a "Danger Zone" delete card; a file browser; a
+  themed confirm modal; 3 theme palettes; an agent detail page with
+  port-range/instances-dir config, a create-server flow (Java software
+  choice of vanilla/Paper/Fabric/Forge, Bedrock vanilla-only, with
+  reusable saved server definitions pinning the same choice, plus a
+  "Server settings" section for Java heap size and gamemode/difficulty/
+  max-players/motd defaults — see "Configurable Java heap size" below),
+  host stats (CPU/RAM/disk/uptime), and an allowlisted diagnostic-command
+  runner; a "Publish Pulse release" form + "→ vNEW available" note for
+  self-update; an adaptive heartbeat interval and adapter-agnostic
+  real-time push layer for the instance console page (see "Adaptive
+  heartbeat interval + real-time push layer" above — Cloudflare half
+  unverified in this environment, flagged explicitly there).
+  `svelte-check` clean; both `ADAPTER=node` and `ADAPTER=cloudflare`
+  builds pass. A Tauri desktop thin client (`panel/src-tauri/`) is
+  compiled and was live-run-verified (WSL2 Ubuntu 24.04) but is **being
+  pulled out of active scope after live Windows testing** — rescoped as
+  a v2 local-Windows-service initiative, not yet designed — see "Panel:
+  one codebase, three adapters" above.
 - Repo pushed to `codenexus/axon` (**public**, AGPL-3.0), `main` branch. A
   tag-triggered CI/CD pipeline (`.github/workflows/release.yml`)
   cross-compiles, signs, and publishes a GitHub Release for Pulse, plus a
@@ -1117,11 +1321,14 @@ Deliberately deferred — don't assume half-built unless you find code for it:
   deliberate boundary, not a gap). A hosted/integrated tunnel for exposing
   a Minecraft server's game port without port-forwarding (playit.gg-style)
   — deferred to a later "v2", not started.
-- Per-host RAM-based Java heap sizing (fixed
-  `provision.DefaultJavaHeapMB` constant) or any UI control for it — a
-  server definition can't capture this either, since there's no admin
-  input for it anywhere yet. Split port ranges per edition (one shared
-  range per agent covers both). Any software beyond Paper/Fabric/Forge
+- **Per-host RAM-based *automatic* Java heap sizing** — an admin can now
+  set heap size explicitly per server at creation time (see "Configurable
+  Java heap size" above), but nothing auto-computes a suggested value
+  from the host's own free RAM; deliberately not attempted, since
+  auto-sizing is a footgun on a host running multiple servers side by
+  side that an explicit admin-set number avoids. Split port ranges per
+  edition (one shared range per agent covers both). Any software beyond
+  Paper/Fabric/Forge
   (e.g. Sponge, Quilt) and anything beyond the latest ~3 versions per
   edition/software. Editing an existing server definition (delete and
   recreate instead). Mod/plugin management (installing actual mods/

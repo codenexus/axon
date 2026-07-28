@@ -74,11 +74,17 @@ type HeartbeatRequest struct {
 	PulseVersion string           `json:"pulse_version"`
 	Host         HostMetrics      `json:"host"`
 	Instances    []InstanceStatus `json:"instances"`
-	// IntervalSeconds is this agent's configured --interval (the sleep
-	// between heartbeats), so Panel can show a "next heartbeat in ~Ns"
-	// countdown rather than guessing a fixed default — it's a per-agent
-	// CLI flag, otherwise invisible to Panel.
+	// IntervalSeconds is the interval Pulse is *currently* sleeping for —
+	// may be a Panel-suggested fast interval (see HeartbeatResponse.
+	// NextIntervalSeconds), not necessarily the configured --interval.
 	IntervalSeconds int `json:"interval_seconds"`
+	// BaseIntervalSeconds is the immutable --interval CLI flag value,
+	// captured once at startup and never mutated. Panel's own staleness
+	// math (isOnline/failStaleCommands' "3 missed heartbeats" deadline)
+	// must key off this, not IntervalSeconds — otherwise a temporary fast
+	// window would shrink that deadline and cause false-positive timeouts
+	// once things settle back to normal cadence.
+	BaseIntervalSeconds int `json:"base_interval_seconds"`
 	// PendingCommandResults are results from previously-polled commands,
 	// piggybacked onto the next heartbeat rather than pushed immediately
 	// (see spec open question #3 — resolved as next-poll-cycle for v1).
@@ -250,4 +256,13 @@ type UpdateInfo struct {
 type HeartbeatResponse struct {
 	Commands []Command   `json:"commands,omitempty"`
 	Update   *UpdateInfo `json:"update,omitempty"`
+	// NextIntervalSeconds suggests the interval Pulse should sleep for
+	// before its next heartbeat — Panel goes fast (a few seconds) while a
+	// command is in flight for this agent or an admin is actively viewing
+	// one of its instances, and falls back to the agent's own
+	// BaseIntervalSeconds otherwise. A pointer so an older Panel that
+	// never sets this field is distinguishable from a deliberate
+	// instruction; Pulse should ignore a non-positive value defensively
+	// rather than trust a hand-mirrored wire type blindly.
+	NextIntervalSeconds *int `json:"next_interval_seconds,omitempty"`
 }

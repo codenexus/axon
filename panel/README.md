@@ -23,22 +23,31 @@ with `wrangler d1 migrations apply` for the hosted target.
 
 ### Running the built adapter-node server directly
 
-`ADAPTER=node pnpm run build && node build/index.js` needs an `ORIGIN` env
-var set (e.g. `ORIGIN=http://localhost:5173`) — without it, SvelteKit's CSRF
-check can't verify same-origin form POSTs (login, enrollment token
-generation, start/stop) against the `Host` header it sees, and rejects them
-with 403. `pnpm run dev` doesn't need this (Vite's dev server sets it for
-you); only the built server does. Tauri's sidecar (once implemented) will
-need to set the same env var when it spawns `build/index.js`.
+`ADAPTER=node pnpm run build && node server.mjs` — **not** `node
+build/index.js` (the adapter's own generated entrypoint). `server.mjs` is a
+thin custom wrapper around the same generated `build/handler.js` middleware,
+needed so the raw Node `http.Server`'s `'upgrade'` event is reachable for
+the real-time push layer's WebSocket connections (`src/lib/server/realtime/`
+— see that directory's `index.ts` for the full picture); neither SvelteKit
+route handlers nor `build/index.js`'s self-contained server expose a hook
+for that. If you have an existing `ADAPTER=node` deployment (e.g. a systemd
+unit), update its `ExecStart=`/run command accordingly.
+
+Needs an `ORIGIN` env var set (e.g. `ORIGIN=http://localhost:5173`) —
+without it, SvelteKit's CSRF check can't verify same-origin form POSTs
+(login, enrollment token generation, start/stop) against the `Host` header
+it sees, and rejects them with 403. `pnpm run dev` doesn't need this (Vite's
+dev server sets it for you, and its own dev-mode WebSocket upgrade handling
+lives in `vite.config.ts`); only the built server does.
 
 It also needs `BODY_SIZE_LIMIT` raised — `@sveltejs/adapter-node`'s built
-server caps every request body at `512K` by default, silently rejecting
-anything bigger (a real backup archive via `push_backup`'s upload route, or
-a plugin/mod file via the file management upload route). `pnpm run dev`
-doesn't enforce this either (only the built server does), which is why it's
-easy to miss locally. Set e.g. `BODY_SIZE_LIMIT=Infinity` (or a specific
-generous byte count) for any real deployment. Tauri's sidecar will need the
-same env var for the same reason as `ORIGIN` above.
+server (and `server.mjs`, which reuses its `handler` middleware) caps every
+request body at `512K` by default, silently rejecting anything bigger (a
+real backup archive via `push_backup`'s upload route, or a plugin/mod file
+via the file management upload route). `pnpm run dev` doesn't enforce this
+either (only the built server does), which is why it's easy to miss
+locally. Set e.g. `BODY_SIZE_LIMIT=Infinity` (or a specific generous byte
+count) for any real deployment.
 
 ### Cloudflare target
 
