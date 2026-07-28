@@ -814,11 +814,34 @@ shortly after.
 
 **New prerequisite for server provisioning**: if Java-edition server
 creation is going to be used on a host, the Pulse service user needs a
-scoped passwordless-sudo rule for package installation (Debian/Ubuntu:
-`apt-get update`/`apt-get install -y openjdk-*`; RHEL/Fedora: `dnf install
--y java-*-openjdk*`/`yum` equivalent). Without it, `javaruntime.EnsureInstalled`
-fails cleanly with a message telling the admin to install Java manually;
-Bedrock creation needs no such rule.
+scoped passwordless-sudo rule for package installation. Without it,
+`javaruntime.EnsureInstalled` fails cleanly with a message telling the
+admin to install Java manually; Bedrock creation needs no such rule.
+**A wildcard rule (`apt-get install -y openjdk-*`) doesn't work on every
+system** — confirmed live on Ubuntu 26.04/sudo 1.9: "wildcards are not
+allowed in command arguments" is a real, non-bypassable hardening some
+sudo builds enable. The reliable form enumerates every exact package
+name `javaruntime.go`'s `packageNames` map can ever request (one
+`NOPASSWD:` line per major version) rather than globbing — tighter than
+a wildcard anyway, since it's a real allowlist instead of a pattern:
+
+```
+axon ALL=(root) NOPASSWD: /usr/bin/apt-get update
+axon ALL=(root) NOPASSWD: /usr/bin/apt-get install -y openjdk-17-jre-headless
+axon ALL=(root) NOPASSWD: /usr/bin/apt-get install -y openjdk-21-jre-headless
+axon ALL=(root) NOPASSWD: /usr/bin/apt-get install -y openjdk-25-jre-headless
+```
+
+RHEL/Fedora needs the equivalent `dnf`/`yum` package names
+(`java-*-openjdk*`) enumerated the same way, one line per exact package
+this project's `packageNames` map can request — untested live so far
+(only Ubuntu has been deployed to), so treat the exact command name
+(`dnf` vs `yum`) and package-name shape as needing the same live
+verification before trusting it. Whichever distro, **always validate
+with `visudo -c` after writing the drop-in file** — a malformed
+`/etc/sudoers.d/` entry is silently ignored by some sudo builds and
+loudly rejected by others; catching it immediately is cheap, debugging
+"sudo rule exists but isn't working" after the fact is not.
 
 ### Panel: one codebase, three adapters, one DB abstraction
 
