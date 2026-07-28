@@ -175,7 +175,7 @@
 </script>
 
 <svelte:head>
-	<title>Axon Panel — {data.instance.name} Backups</title>
+	<title>Axon Panel — {data.instance.name}</title>
 </svelte:head>
 
 <div class="page">

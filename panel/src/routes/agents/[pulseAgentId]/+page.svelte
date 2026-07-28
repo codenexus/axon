@@ -259,7 +259,7 @@
 								? ` · port ${instance.port}`
 								: ''}</span
 						>
-						<a class="ghost-link" href="/instances/{instance.id}">Backups →</a>
+						<a class="ghost-link" href="/instances/{instance.id}">Manage →</a>
 					</li>
 				{/each}
 			</ul>

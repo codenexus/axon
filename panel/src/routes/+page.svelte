@@ -215,7 +215,7 @@
 									</button>
 								</form>
 							</div>
-							<a class="ghost-link backups-link" href="/instances/{instance.id}">Backups →</a>
+							<a class="ghost-link backups-link" href="/instances/{instance.id}">Manage →</a>
 						</li>
 					{/each}
 				</ul>
