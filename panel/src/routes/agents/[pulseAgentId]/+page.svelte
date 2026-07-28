@@ -361,6 +361,7 @@
 	}
 
 	.settings-form input {
+		box-sizing: border-box;
 		padding: 0.5rem 0.625rem;
 		border-radius: 0.375rem;
 		border: 1px solid var(--axon-accent);
