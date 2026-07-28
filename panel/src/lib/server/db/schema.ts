@@ -144,6 +144,21 @@ export const versionCatalogEntries = sqliteTable('version_catalog_entries', {
 	expiresAt: integer('expires_at').notNull()
 });
 
+// Tracks the last time a *fetch attempt* was made per (gamePlatform,
+// softwareType), independent of whether it produced any entries in
+// versionCatalogEntries above. Needed because a failed/empty fetch
+// inserts zero rows there, so without this a resolver with no
+// successful history (e.g. minecraft.net's Bedrock scrape, confirmed
+// unreliable — see versionCatalog.ts) has nothing to treat as "fresh"
+// and re-attempts the live fetch on every single page load, each paying
+// the full fetch timeout. This lets resolveCached() skip retrying for
+// NEGATIVE_CACHE_TTL_MS after a recent failed attempt, distinct from
+// (and much shorter than) CATALOG_TTL_MS for a successful one.
+export const versionCatalogFetchAttempts = sqliteTable('version_catalog_fetch_attempts', {
+	id: text('id').primaryKey(), // `${gamePlatform}:${softwareType}`
+	attemptedAt: integer('attempted_at').notNull()
+});
+
 // A reusable server-creation template — global, not per-agent (describes
 // *what* to install, not *where*). version/downloadUrl/javaMajorVersion
 // are pinned at creation time from a real versionCatalogEntries

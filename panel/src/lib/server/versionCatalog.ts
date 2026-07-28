@@ -1,9 +1,17 @@
 import { and, eq, gt } from 'drizzle-orm';
 import type { Db } from './db';
-import { versionCatalogEntries } from './db/schema';
+import { versionCatalogEntries, versionCatalogFetchAttempts } from './db/schema';
 
 // How long a resolved version list is trusted before Panel re-fetches it.
 export const CATALOG_TTL_MS = 12 * 60 * 60 * 1000;
+
+// How long to wait before retrying a fetch that failed or produced zero
+// entries, distinct from (and much shorter than) CATALOG_TTL_MS, which
+// only applies once a fetch has actually succeeded. See
+// versionCatalogFetchAttempts in db/schema.ts for why this needs its own
+// tracking table rather than reusing versionCatalogEntries' own
+// fetchedAt/expiresAt.
+const NEGATIVE_CACHE_TTL_MS = 15 * 60 * 1000;
 
 // Only the latest few versions are offered — not full historical catalogs.
 const LATEST_VERSION_COUNT = 3;
@@ -148,7 +156,10 @@ export async function resolveVersionSelection(
 // Shared cache-or-fetch shape every resolveXVersions() above follows:
 // serve a fresh cached catalog if one exists, otherwise fetch live and
 // replace the cache, falling back to a stale cache (or empty) if the
-// live fetch itself fails.
+// live fetch itself fails. A failure (or empty result) also records a
+// negative-cache attempt so a reliably-failing endpoint (e.g.
+// minecraft.net's Bedrock scrape) isn't retried on every single page
+// load — see NEGATIVE_CACHE_TTL_MS and versionCatalogFetchAttempts.
 async function resolveCached(
 	db: Db,
 	gamePlatform: string,
@@ -157,6 +168,11 @@ async function resolveCached(
 ): Promise<VersionCatalogEntry[]> {
 	const cached = await freshEntries(db, gamePlatform, softwareType);
 	if (cached.length > 0) return cached;
+
+	const attemptId = `${gamePlatform}:${softwareType}`;
+	if (await recentlyAttempted(db, attemptId)) {
+		return staleEntries(db, gamePlatform, softwareType);
+	}
 
 	try {
 		const fresh = await fetcher();
@@ -170,7 +186,24 @@ async function resolveCached(
 		// change shape; that's never a reason to break the create-server
 		// form entirely.
 	}
+	await recordAttempt(db, attemptId);
 	return staleEntries(db, gamePlatform, softwareType);
+}
+
+async function recentlyAttempted(db: Db, id: string): Promise<boolean> {
+	const [row] = await db
+		.select({ attemptedAt: versionCatalogFetchAttempts.attemptedAt })
+		.from(versionCatalogFetchAttempts)
+		.where(eq(versionCatalogFetchAttempts.id, id));
+	return !!row && row.attemptedAt > Date.now() - NEGATIVE_CACHE_TTL_MS;
+}
+
+async function recordAttempt(db: Db, id: string): Promise<void> {
+	const attemptedAt = Date.now();
+	await db
+		.insert(versionCatalogFetchAttempts)
+		.values({ id, attemptedAt })
+		.onConflictDoUpdate({ target: versionCatalogFetchAttempts.id, set: { attemptedAt } });
 }
 
 async function freshEntries(db: Db, gamePlatform: string, softwareType: string): Promise<VersionCatalogEntry[]> {
