@@ -7,6 +7,57 @@ documentation — see `README.md` for that, `CLAUDE.md` for architecture,
 
 ---
 
+## 2026-07-28 (cont.) — Discovered: Bedrock Dedicated Server has no RCON at all
+
+Tried to enable RCON on nimo's real "Survival" Bedrock instance to test
+the console feature end-to-end (prompted by the earlier self-update
+incident leaving a stale "Failed" transcript entry visible in the UI).
+Went through several real dead ends before landing on the actual answer:
+a first attempt collided `rcon.port` with `server-portv6` (both 19133);
+fixed, but the connection was then refused outright — nothing was
+listening. Checked the actual `bedrock_server` startup log directly
+(`pulse.log` inside the instance's own working directory, distinct from
+Pulse's own log) — it initializes IPv4/IPv6 game ports and completes
+startup normally, but never mentions RCON at all, success or failure,
+despite `enable-rcon=true` being correctly present in `server.properties`
+on disk. Chased a "maybe Bedrock uses different key names" theory
+(`rcon-port` vs `rcon.port`, `on`/`off` vs `true`/`false`) based on
+inconsistent hosting-provider pages, before confirming against the
+actual `server.properties` key reference and Mojang's own Bedrock
+feedback docs: **RCON is a Java Edition-only concept. Bedrock Dedicated
+Server has never had any RCON support, full stop** — not a version gap,
+not a key-naming mismatch.
+
+This corrects a wrong assumption baked into this project since the
+backups feature was first built: CLAUDE.md previously said Bedrock RCON
+existed but didn't support Java's `save-off`/`save-all` convention
+specifically — actually there's no Bedrock RCON to support any
+convention. The conclusion that reasoning was used for (backups always
+stop the server first) was never wrong, just the stated justification.
+
+**Fixed**: CLAUDE.md corrected in two places (the backups reasoning, and
+a new note on "Raw RCON console"). The instance page now gates the
+Console and Player Management (whitelist/op/ban) cards behind
+`gamePlatform === 'java'`, showing a short explanatory note for Bedrock
+instances instead of controls that could only ever fail — the properties
+editor is unaffected (plain file read/write, no RCON involved) and is
+now the explicitly-pointed-to place for a Bedrock admin to configure
+anything. nimo's Survival instance had its test RCON config reverted
+back to just the two port lines it started with.
+
+### Next 2–3 logical steps
+
+1. Bedrock's actual admin surface is `server.properties` plus whatever
+   the game itself exposes in-game — worth a future pass considering
+   whether Bedrock needs its own lightweight admin story (there's no
+   RCON to build one on), or whether this is simply out of scope given
+   Bedrock's own ecosystem constraints.
+2. Still open from prior sessions: the Cloudflare Durable Object spike,
+   Fabric/Forge provisioning verification against a real Java
+   environment, and a real restore against nimo's actual backups.
+
+---
+
 ## 2026-07-28 — nimo Panel deployment, bug-fix sprint, adaptive interval + real-time push
 
 ### What we finished

@@ -345,9 +345,16 @@ Four foundational decisions, all load-bearing:
    check `platform?.env?.DB` first and refuse cleanly; backup *metadata*
    (the `backups`/`backup_downloads` tables) is fine on D1 either way.
 
-**Why backups stop the server first, always**: Java Edition's RCON
-`save-off`/`save-all` pause-writes convention is not supported by Bedrock
-Dedicated Server's RCON. Rather than branching per edition,
+**Why backups stop the server first, always**: **Bedrock Dedicated
+Server has no RCON support at all** — confirmed live (see "Raw RCON
+console" below for how this was discovered against a real Bedrock
+instance) against the official `server.properties` key reference, which
+lists `enable-rcon`/`rcon.port`/`rcon.password` only under Java Edition,
+and Mojang's own Bedrock feedback docs. (This project's earlier
+documentation here said Bedrock RCON existed but just didn't support
+Java's `save-off`/`save-all` pause-writes convention specifically — that
+was wrong; there's no Bedrock RCON to support any convention at all.)
+Rather than branching per edition,
 `backup_instance`/`restore_backup` both stop the instance if running
 (reusing `gracefulStop`) → do the archive/restore work with nothing
 writing to disk → restart afterward *only for backup* (restore always
@@ -732,6 +739,24 @@ just `svelte-check`, before calling a Panel change verified.
 instance's RCON port (`Manager.RunConsoleCommand`,
 `pulse/internal/mcserver/rcon_command.go`), text response returned to
 Panel. Synchronous like every command type except `create_instance`.
+
+**Java only — Bedrock Dedicated Server has no RCON support at all**,
+confirmed live against a real production Bedrock instance (nimo's
+"Survival"): `enable-rcon`/`rcon.port`/`rcon.password` in
+`server.properties` do nothing on Bedrock — `bedrock_server`'s own
+startup log never mentions RCON at all, success or failure, even with
+those keys correctly set (this was chased for a while as a suspected
+config-key-naming mismatch, e.g. Java's `rcon.port` vs. a hypothetical
+Bedrock `rcon-port`, before confirming via the official
+`server.properties` key reference that RCON is a Java-only concept with
+no Bedrock equivalent whatsoever, not a naming or version issue). The
+instance page reflects this directly: the Console card and the
+"Player Management" whitelist/op/ban card (below) are both gated behind
+`data.instance.gamePlatform === 'java'`, replaced by a short explanatory
+note for Bedrock instances rather than showing controls that can only
+ever fail. The properties editor (below) is unaffected — it's a plain
+file read/write via Pulse, nothing RCON-dependent about it, so it's the
+right place to point a Bedrock admin who needs something configured.
 
 **`Success` vs `Output` is deliberate**: `Success` reflects whether the
 RCON exchange itself worked (reachable, authenticated) — `false` only for

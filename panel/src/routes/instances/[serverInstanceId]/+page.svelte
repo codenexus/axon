@@ -188,7 +188,7 @@
 	// Clears the command input after a successful send, rather than leaving
 	// the just-sent text sitting there — the transcript below is the record
 	// of what was sent, the input is just for composing the next one.
-	let consoleForm: HTMLFormElement;
+	let consoleForm: HTMLFormElement | undefined = $state();
 	function handleConsoleSubmit() {
 		return async ({ result, update }: { result: ActionResult; update: () => Promise<void> }) => {
 			await update();
@@ -232,6 +232,7 @@
 		<a class="ghost-link" href="/instances/{data.instance.id}/files">Files →</a>
 	</header>
 
+	{#if data.instance.gamePlatform === 'java'}
 	<section class="card">
 		<div class="section-header">
 			<h2>Console</h2>
@@ -415,6 +416,19 @@
 			<p class="error">{form.error}</p>
 		{/if}
 	</section>
+	{:else}
+	<section class="card">
+		<div class="section-header">
+			<h2>Console</h2>
+		</div>
+		<p class="meta">
+			Bedrock Dedicated Server has no RCON support — Mojang never shipped it, confirmed against the official
+			server.properties reference and Bedrock feedback docs. The raw console and player-management tools above
+			only work for Java instances; edit <code>server.properties</code> directly below for anything Bedrock needs
+			configured.
+		</p>
+	</section>
+	{/if}
 
 	<section class="card">
 		<div class="section-header">
