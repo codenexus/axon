@@ -3,6 +3,7 @@
 	import { invalidateAll } from '$app/navigation';
 	import type { ActionResult } from '@sveltejs/kit';
 	import type { ActionData, PageData } from './$types';
+	import { formatDuration } from '$lib/format';
 
 	let { data, form }: { data: PageData; form: ActionData } = $props();
 
@@ -248,7 +249,26 @@
 			<ul class="instances">
 				{#each data.instances as instance (instance.id)}
 					<li>
+						<div class="instance-row">
+						<div class="instance-info">
 						<div class="instance-main">
+							<svg
+								class="server-icon"
+								viewBox="0 0 24 24"
+								width="14"
+								height="14"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								aria-hidden="true"
+							>
+								<title>Minecraft server</title>
+								<path d="M12 2 L21 7 L21 17 L12 22 L3 17 L3 7 Z"></path>
+								<path d="M12 22 L12 12"></path>
+								<path d="M21 7 L12 12 L3 7"></path>
+							</svg>
 							<strong>{instance.name}</strong>
 							<span class="badge {stateClass[instance.runningState] ?? 'badge-info'}">
 								{stateLabel[instance.runningState] ?? instance.runningState}
@@ -259,7 +279,18 @@
 								? ` · port ${instance.port}`
 								: ''}</span
 						>
-						<a class="ghost-link" href="/instances/{instance.id}">Manage →</a>
+						</div>
+						<div class="instance-side">
+							{#if instance.runningState === 'running'}
+								<span class="instance-stats"
+									>{instance.playerCount} player{instance.playerCount === 1 ? '' : 's'} · up {formatDuration(
+										instance.uptimeSeconds
+									)}</span
+								>
+							{/if}
+							<a class="ghost-link" href="/instances/{instance.id}">Manage →</a>
+						</div>
+						</div>
 					</li>
 				{/each}
 			</ul>
@@ -386,15 +417,43 @@
 	.instances li {
 		border-top: 1px solid var(--axon-accent);
 		padding-top: 0.75rem;
+	}
+
+	.instance-row {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 1rem;
+		flex-wrap: wrap;
+	}
+
+	.instance-info {
 		display: flex;
 		flex-direction: column;
 		gap: 0.25rem;
+	}
+
+	.instance-side {
+		display: flex;
+		align-items: center;
+		gap: 1rem;
+	}
+
+	.instance-stats {
+		font-size: 0.8rem;
+		opacity: 0.85;
+		white-space: nowrap;
 	}
 
 	.instance-main {
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
+	}
+
+	.server-icon {
+		opacity: 0.6;
+		flex-shrink: 0;
 	}
 
 	.badge {

@@ -2,6 +2,7 @@
 	import { enhance } from '$app/forms';
 	import { invalidateAll } from '$app/navigation';
 	import { heartbeatProgress, isOnline as isAgentOnline, nextHeartbeatLabel } from '$lib/heartbeat';
+	import { formatDuration } from '$lib/format';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -144,34 +145,98 @@
 				<ul class="instances">
 					{#each agent.instances as instance (instance.id)}
 						<li>
-							<div class="instance-name">
-								<strong>{instance.name}</strong>
-								{#if data.instancesBackingUp[instance.id]}
-									<span
-										class="badge badge-warning badge-pulsing"
-										title="A backup/restore's stop→archive→restart cycle happens between heartbeats, so running_state can't be trusted until it's done"
-									>
-										{backupBadgeLabel[data.instancesBackingUp[instance.id]]}
-									</span>
-								{:else if data.pendingActions[instance.id]}
-									<span
-										class="badge badge-warning badge-pulsing"
-										title="Command sent to Pulse; running_state often jumps straight to the new state without ever showing this in between"
-									>
-										{pendingActionLabel[data.pendingActions[instance.id]]}
-									</span>
-								{:else}
-									<span
-										class="badge {stateClass[instance.runningState] ?? 'badge-info'} {instance.runningState ===
-											'starting' || instance.runningState === 'stopping'
-											? 'badge-pulsing'
-											: ''}"
-									>
-										{stateLabel[instance.runningState] ?? instance.runningState}
-									</span>
-								{/if}
+							<div class="instance-row">
+								<div class="instance-info">
+									<div class="instance-name">
+										<svg
+											class="server-icon"
+											viewBox="0 0 24 24"
+											width="14"
+											height="14"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="2"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+											aria-hidden="true"
+										>
+											<title>Minecraft server</title>
+											<path d="M12 2 L21 7 L21 17 L12 22 L3 17 L3 7 Z"></path>
+											<path d="M12 22 L12 12"></path>
+											<path d="M21 7 L12 12 L3 7"></path>
+										</svg>
+										<strong>{instance.name}</strong>
+										{#if data.instancesBackingUp[instance.id]}
+											<span
+												class="badge badge-warning badge-pulsing"
+												title="A backup/restore's stop→archive→restart cycle happens between heartbeats, so running_state can't be trusted until it's done"
+											>
+												{backupBadgeLabel[data.instancesBackingUp[instance.id]]}
+											</span>
+										{:else if data.pendingActions[instance.id]}
+											<span
+												class="badge badge-warning badge-pulsing"
+												title="Command sent to Pulse; running_state often jumps straight to the new state without ever showing this in between"
+											>
+												{pendingActionLabel[data.pendingActions[instance.id]]}
+											</span>
+										{:else}
+											<span
+												class="badge {stateClass[instance.runningState] ?? 'badge-info'} {instance.runningState ===
+													'starting' || instance.runningState === 'stopping'
+													? 'badge-pulsing'
+													: ''}"
+											>
+												{stateLabel[instance.runningState] ?? instance.runningState}
+											</span>
+										{/if}
+									</div>
+									<span class="meta">{instance.gamePlatform} · {instance.softwareType} {instance.version}</span>
+								</div>
+								<div class="instance-side">
+									{#if instance.runningState === 'running'}
+										<span class="instance-stats"
+											>{instance.playerCount} player{instance.playerCount === 1 ? '' : 's'} · up {formatDuration(
+												instance.uptimeSeconds
+											)}</span
+										>
+									{/if}
+									<div class="instance-actions">
+										<form method="POST" action="?/queueCommand" use:enhance>
+											<input type="hidden" name="pulse_agent_id" value={agent.id} />
+											<input type="hidden" name="instance_id" value={instance.instanceId} />
+											<input
+												type="hidden"
+												name="type"
+												value={instance.runningState === 'running' ? 'restart_instance' : 'start_instance'}
+											/>
+											<button
+												type="submit"
+												disabled={isBusy(instance) ||
+													instance.runningState === 'starting' ||
+													instance.runningState === 'stopping'}
+											>
+												{instance.runningState === 'running' ? 'Restart' : 'Start'}
+											</button>
+										</form>
+										<form method="POST" action="?/queueCommand" use:enhance>
+											<input type="hidden" name="pulse_agent_id" value={agent.id} />
+											<input type="hidden" name="instance_id" value={instance.instanceId} />
+											<input type="hidden" name="type" value="stop_instance" />
+											<button
+												type="submit"
+												class="ghost"
+												disabled={isBusy(instance) ||
+													instance.runningState === 'stopped' ||
+													instance.runningState === 'stopping'}
+											>
+												Stop
+											</button>
+										</form>
+									</div>
+									<a class="ghost-link backups-link" href="/instances/{instance.id}">Manage →</a>
+								</div>
 							</div>
-							<span class="meta">{instance.gamePlatform} · {instance.softwareType} {instance.version}</span>
 							{#if isBusy(instance) && agent.lastSeenAt}
 								<div class="heartbeat-bar" title={nextHeartbeatLabel(agent, now)}>
 									<div
@@ -182,40 +247,6 @@
 								</div>
 								<p class="meta">{nextHeartbeatLabel(agent, now)}</p>
 							{/if}
-							<div class="instance-actions">
-								<form method="POST" action="?/queueCommand" use:enhance>
-									<input type="hidden" name="pulse_agent_id" value={agent.id} />
-									<input type="hidden" name="instance_id" value={instance.instanceId} />
-									<input
-										type="hidden"
-										name="type"
-										value={instance.runningState === 'running' ? 'restart_instance' : 'start_instance'}
-									/>
-									<button
-										type="submit"
-										disabled={isBusy(instance) ||
-											instance.runningState === 'starting' ||
-											instance.runningState === 'stopping'}
-									>
-										{instance.runningState === 'running' ? 'Restart' : 'Start'}
-									</button>
-								</form>
-								<form method="POST" action="?/queueCommand" use:enhance>
-									<input type="hidden" name="pulse_agent_id" value={agent.id} />
-									<input type="hidden" name="instance_id" value={instance.instanceId} />
-									<input type="hidden" name="type" value="stop_instance" />
-									<button
-										type="submit"
-										class="ghost"
-										disabled={isBusy(instance) ||
-											instance.runningState === 'stopped' ||
-											instance.runningState === 'stopping'}
-									>
-										Stop
-									</button>
-								</form>
-							</div>
-							<a class="ghost-link backups-link" href="/instances/{instance.id}">Manage →</a>
 						</li>
 					{/each}
 				</ul>
@@ -293,9 +324,32 @@
 	.instances li {
 		border-top: 1px solid var(--axon-accent);
 		padding-top: 0.75rem;
+	}
+
+	.instance-row {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 1rem;
+		flex-wrap: wrap;
+	}
+
+	.instance-info {
 		display: flex;
 		flex-direction: column;
 		gap: 0.25rem;
+	}
+
+	.instance-side {
+		display: flex;
+		align-items: center;
+		gap: 1rem;
+	}
+
+	.instance-stats {
+		font-size: 0.8rem;
+		opacity: 0.85;
+		white-space: nowrap;
 	}
 
 	.instance-name {
@@ -304,10 +358,14 @@
 		gap: 0.5rem;
 	}
 
+	.server-icon {
+		opacity: 0.6;
+		flex-shrink: 0;
+	}
+
 	.instance-actions {
 		display: flex;
 		gap: 0.5rem;
-		margin-top: 0.25rem;
 	}
 
 	.badge {
