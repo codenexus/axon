@@ -20,6 +20,16 @@ const FORGE_PROMOTIONS_URL = 'https://files.minecraftforge.net/net/minecraftforg
 // good practice for the rest.
 const USER_AGENT = 'Axon-Panel (https://github.com/codenexus/axon)';
 
+// resolveCached() below already catches a fetch failure and falls back to
+// a stale (or empty) cached result -- but only once the fetch actually
+// fails. With no timeout, a connection that hangs instead of erroring
+// (confirmed live against minecraft.net's flaky Bedrock download page,
+// see fetchBedrockVersions) never triggers that fallback at all; it just
+// blocks the whole /settings and create-server page load indefinitely,
+// which looks identical to a dead button from the admin's side. Every
+// fetch() in this file must pass this signal.
+const FETCH_TIMEOUT_MS = 8000;
+
 export interface VersionCatalogEntry {
 	id: string;
 	gamePlatform: string;
@@ -202,7 +212,7 @@ async function replaceEntries(
 }
 
 async function fetchJavaVersions(): Promise<VersionCatalogEntry[]> {
-	const manifestRes = await fetch(MOJANG_MANIFEST_URL, { headers: { 'User-Agent': USER_AGENT } });
+	const manifestRes = await fetch(MOJANG_MANIFEST_URL, { headers: { 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
 	if (!manifestRes.ok) throw new Error(`mojang manifest fetch failed: ${manifestRes.status}`);
 	const manifest = (await manifestRes.json()) as { versions: MojangManifestVersion[] };
 
@@ -211,7 +221,7 @@ async function fetchJavaVersions(): Promise<VersionCatalogEntry[]> {
 	const entries: VersionCatalogEntry[] = [];
 	for (let i = 0; i < releases.length; i++) {
 		const release = releases[i];
-		const detailRes = await fetch(release.url, { headers: { 'User-Agent': USER_AGENT } });
+		const detailRes = await fetch(release.url, { headers: { 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
 		if (!detailRes.ok) continue; // skip one bad version rather than failing the whole batch
 		const detail = (await detailRes.json()) as MojangVersionDetail;
 		const downloadUrl = detail.downloads?.server?.url;
@@ -233,7 +243,7 @@ async function fetchJavaVersions(): Promise<VersionCatalogEntry[]> {
 }
 
 async function fetchBedrockVersions(): Promise<VersionCatalogEntry[]> {
-	const res = await fetch(BEDROCK_DOWNLOAD_PAGE_URL, { headers: { 'User-Agent': USER_AGENT } });
+	const res = await fetch(BEDROCK_DOWNLOAD_PAGE_URL, { headers: { 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
 	if (!res.ok) throw new Error(`bedrock download page fetch failed: ${res.status}`);
 	const html = await res.text();
 
@@ -279,7 +289,7 @@ async function fetchPaperVersions(): Promise<VersionCatalogEntry[]> {
 	const vanillaVersions = await latestVanillaMcVersions();
 	const javaMajorByVersion = new Map(vanillaVersions.map((v) => [v.version, v.javaMajorVersion]));
 
-	const projectRes = await fetch(PAPER_PROJECT_URL, { headers: { 'User-Agent': USER_AGENT } });
+	const projectRes = await fetch(PAPER_PROJECT_URL, { headers: { 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
 	if (!projectRes.ok) throw new Error(`paper project fetch failed: ${projectRes.status}`);
 	const project = (await projectRes.json()) as PaperProjectResponse;
 
@@ -301,7 +311,8 @@ async function fetchPaperVersions(): Promise<VersionCatalogEntry[]> {
 	for (let i = 0; i < candidateVersions.length; i++) {
 		const version = candidateVersions[i];
 		const buildsRes = await fetch(`${PAPER_PROJECT_URL}/versions/${version}/builds`, {
-			headers: { 'User-Agent': USER_AGENT }
+			headers: { 'User-Agent': USER_AGENT },
+			signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
 		});
 		if (!buildsRes.ok) continue;
 		const builds = (await buildsRes.json()) as PaperBuild[];
@@ -336,7 +347,7 @@ interface FabricInstallerEntry {
 async function fetchFabricVersions(): Promise<VersionCatalogEntry[]> {
 	const vanillaVersions = await latestVanillaMcVersions();
 
-	const installerRes = await fetch(FABRIC_INSTALLER_URL, { headers: { 'User-Agent': USER_AGENT } });
+	const installerRes = await fetch(FABRIC_INSTALLER_URL, { headers: { 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
 	if (!installerRes.ok) throw new Error(`fabric installer list fetch failed: ${installerRes.status}`);
 	const installers = (await installerRes.json()) as FabricInstallerEntry[];
 	const installer = installers.find((i) => i.stable) ?? installers[0];
@@ -345,7 +356,7 @@ async function fetchFabricVersions(): Promise<VersionCatalogEntry[]> {
 	const entries: VersionCatalogEntry[] = [];
 	for (let i = 0; i < vanillaVersions.length; i++) {
 		const { version, javaMajorVersion } = vanillaVersions[i];
-		const loaderRes = await fetch(`${FABRIC_LOADER_URL}/${version}`, { headers: { 'User-Agent': USER_AGENT } });
+		const loaderRes = await fetch(`${FABRIC_LOADER_URL}/${version}`, { headers: { 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
 		if (!loaderRes.ok) continue;
 		const loaders = (await loaderRes.json()) as FabricLoaderEntry[];
 		const loader = loaders.find((l) => l.loader.stable) ?? loaders[0];
@@ -372,7 +383,7 @@ interface ForgePromotions {
 async function fetchForgeVersions(): Promise<VersionCatalogEntry[]> {
 	const vanillaVersions = await latestVanillaMcVersions();
 
-	const promosRes = await fetch(FORGE_PROMOTIONS_URL, { headers: { 'User-Agent': USER_AGENT } });
+	const promosRes = await fetch(FORGE_PROMOTIONS_URL, { headers: { 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
 	if (!promosRes.ok) throw new Error(`forge promotions fetch failed: ${promosRes.status}`);
 	const promotions = (await promosRes.json()) as ForgePromotions;
 
