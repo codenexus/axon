@@ -36,6 +36,29 @@
 	const usingDefinition = $derived(selectedDefinitionId !== '');
 	const selectedDefinition = $derived(data.definitions.find((d) => d.id === selectedDefinitionId));
 
+	// A definition pins *what* to install (see selectedDefinition above),
+	// never *how it's configured* — heap size and property overrides below
+	// are always chosen fresh at creation time regardless of whether a
+	// definition supplied the software/version, so this derives which
+	// edition's options (e.g. gamemode) to offer either way.
+	const effectiveEdition = $derived(usingDefinition ? selectedDefinition?.gamePlatform : selectedEdition);
+
+	// Pre-filled with the same defaults vanilla server software would pick
+	// on its own first launch (see pulse/internal/provision) -- showing
+	// them upfront rather than leaving the admin to discover and edit them
+	// after the fact via the properties editor.
+	let javaHeapMb = $state(2048);
+	let gamemode = $state('survival');
+	let difficulty = $state('easy');
+	let maxPlayers = $state(20);
+	let motd = $state('A Minecraft Server');
+
+	// Bedrock has no "spectator" server.properties value -- reset off it if
+	// the edition changes out from under an already-chosen gamemode.
+	$effect(() => {
+		if (effectiveEdition === 'bedrock' && gamemode === 'spectator') gamemode = 'survival';
+	});
+
 	// Pre-fill the Bedrock URL from the resolved catalog entry the first
 	// time it arrives, without clobbering an admin's own edit afterward.
 	let bedrockPrefilled = $state(false);
@@ -186,6 +209,47 @@
 					{/if}
 				{/if}
 
+				<h2 class="section-label">Server settings</h2>
+				<p class="meta">
+					Pre-filled with the same defaults the server software would pick on its own first launch — change
+					anything here, or leave it and edit server.properties later.
+				</p>
+
+				{#if effectiveEdition === 'java'}
+					<label>
+						Java heap size (MB)
+						<input type="number" name="java_heap_mb" min="512" step="256" bind:value={javaHeapMb} />
+					</label>
+				{/if}
+				<label>
+					Gamemode
+					<select name="gamemode" bind:value={gamemode}>
+						<option value="survival">Survival</option>
+						<option value="creative">Creative</option>
+						<option value="adventure">Adventure</option>
+						{#if effectiveEdition !== 'bedrock'}
+							<option value="spectator">Spectator</option>
+						{/if}
+					</select>
+				</label>
+				<label>
+					Difficulty
+					<select name="difficulty" bind:value={difficulty}>
+						<option value="peaceful">Peaceful</option>
+						<option value="easy">Easy</option>
+						<option value="normal">Normal</option>
+						<option value="hard">Hard</option>
+					</select>
+				</label>
+				<label>
+					Max players
+					<input type="number" name="max_players" min="1" step="1" bind:value={maxPlayers} />
+				</label>
+				<label class="grow">
+					Server name / MOTD
+					<input type="text" name="motd" bind:value={motd} />
+				</label>
+
 				{#if form?.error}
 					<p class="error">{form.error}</p>
 				{/if}
@@ -247,6 +311,13 @@
 		gap: 0.25rem;
 		font-size: 0.8rem;
 		opacity: 0.85;
+	}
+
+	.section-label {
+		font-size: 0.9rem;
+		margin: 0.5rem 0 0;
+		padding-top: 1rem;
+		border-top: 1px solid var(--axon-accent);
 	}
 
 	.create-form input,

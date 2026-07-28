@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/codenexus/axon/pulse/internal/protocol"
@@ -276,5 +277,81 @@ func TestConfigureBedrockSetsLibraryPath(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "eula.txt")); err == nil {
 		t.Fatal("bedrock should not get an eula.txt")
+	}
+}
+
+func TestConfigureJavaCustomHeapSize(t *testing.T) {
+	dir := t.TempDir()
+	payload := protocol.CreateInstanceCommandPayload{
+		GamePlatform: "java",
+		SoftwareType: "vanilla",
+		Port:         25570,
+		WorkingDir:   dir,
+		JavaHeapMB:   4096,
+	}
+	command, _, err := Configure(payload, "/usr/bin/java")
+	if err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	want := []string{"/usr/bin/java", "-Xmx4096M", "-jar", "server.jar", "nogui"}
+	if len(command) != len(want) {
+		t.Fatalf("command = %v, want %v", command, want)
+	}
+	for i := range want {
+		if command[i] != want[i] {
+			t.Fatalf("command = %v, want %v", command, want)
+		}
+	}
+}
+
+func TestConfigureJavaPropertyOverrides(t *testing.T) {
+	dir := t.TempDir()
+	payload := protocol.CreateInstanceCommandPayload{
+		GamePlatform: "java",
+		SoftwareType: "vanilla",
+		Port:         25571,
+		WorkingDir:   dir,
+		Gamemode:     "creative",
+		Difficulty:   "hard",
+		MaxPlayers:   5,
+		Motd:         "My Server",
+	}
+	if _, _, err := Configure(payload, "/usr/bin/java"); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	props, err := os.ReadFile(filepath.Join(dir, "server.properties"))
+	if err != nil {
+		t.Fatalf("read server.properties: %v", err)
+	}
+	for _, want := range []string{"server-port=25571", "gamemode=creative", "difficulty=hard", "max-players=5", "motd=My Server"} {
+		if !strings.Contains(string(props), want) {
+			t.Fatalf("server.properties = %q, missing %q", props, want)
+		}
+	}
+}
+
+// Bedrock has no "motd" key -- its equivalent is "server-name". A payload
+// built for Bedrock must never write a "motd" line, or the value is
+// silently ignored by the real server.
+func TestConfigureBedrockMotdMapsToServerName(t *testing.T) {
+	dir := t.TempDir()
+	payload := protocol.CreateInstanceCommandPayload{
+		GamePlatform: "bedrock",
+		Port:         19134,
+		WorkingDir:   dir,
+		Motd:         "My Bedrock Server",
+	}
+	if _, _, err := Configure(payload, ""); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	props, err := os.ReadFile(filepath.Join(dir, "server.properties"))
+	if err != nil {
+		t.Fatalf("read server.properties: %v", err)
+	}
+	if !strings.Contains(string(props), "server-name=My Bedrock Server") {
+		t.Fatalf("server.properties = %q, missing server-name", props)
+	}
+	if strings.Contains(string(props), "motd=") {
+		t.Fatalf("server.properties = %q, should not contain a motd key for bedrock", props)
 	}
 }

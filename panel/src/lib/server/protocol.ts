@@ -107,6 +107,18 @@ export interface CreateInstanceCommandPayload {
 	loader_version?: string;
 	port: number;
 	working_dir: string;
+	// java_heap_mb is the -Xmx applied at launch, java only. Omitted falls
+	// back to Pulse's own DefaultJavaHeapMB. gamemode/difficulty/
+	// max_players share the same server.properties key on both editions;
+	// motd is edition-mapped by Pulse itself ("motd" for java,
+	// "server-name" for bedrock — Bedrock has no "motd" key). All four are
+	// optional: omitted means "don't write this key", leaving the server
+	// software's own first-launch default untouched.
+	java_heap_mb?: number;
+	gamemode?: string;
+	difficulty?: string;
+	max_players?: number;
+	motd?: string;
 }
 
 // Reports that a long-running command (currently only create_instance) is

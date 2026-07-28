@@ -169,6 +169,23 @@ type CreateInstanceCommandPayload struct {
 	LoaderVersion string `json:"loader_version,omitempty"`
 	Port          int    `json:"port"`
 	WorkingDir    string `json:"working_dir"`
+	// JavaHeapMB is the -Xmx applied at launch, java only. 0/omitted falls
+	// back to provision.DefaultJavaHeapMB — kept optional rather than
+	// required so an older Panel (or a payload built by hand/in a test)
+	// still produces a working launch command.
+	JavaHeapMB int `json:"java_heap_mb,omitempty"`
+	// Gamemode/Difficulty/MaxPlayers share the same server.properties key
+	// on both editions. Motd is edition-mapped by Configure() itself
+	// ("motd" for java, "server-name" for bedrock — Bedrock has no "motd"
+	// key) so Panel only ever has to think in terms of one concept. All
+	// four are optional: an empty/zero value here means "don't write this
+	// key at all", leaving the server's own built-in default from its
+	// first real launch untouched, exactly like today's behavior for
+	// every key this payload doesn't mention.
+	Gamemode   string `json:"gamemode,omitempty"`
+	Difficulty string `json:"difficulty,omitempty"`
+	MaxPlayers int    `json:"max_players,omitempty"`
+	Motd       string `json:"motd,omitempty"`
 }
 
 // ConsoleCommandPayload is the Payload shape for "console_command" — an

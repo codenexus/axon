@@ -230,20 +230,26 @@ func RunInstaller(softwareType, workingDir, javaBin, mcVersion, loaderVersion st
 	return nil
 }
 
-// DefaultJavaHeapMB is the fixed -Xmx applied to every newly-provisioned
-// Java instance in v1 — no per-host RAM-based sizing or UI control yet.
-// The admin can hand-edit the instance's launch command afterward for a
-// specific server that needs something different.
+// DefaultJavaHeapMB is the -Xmx applied when a create_instance payload
+// doesn't specify JavaHeapMB (0/omitted) — no per-host RAM-based sizing,
+// just a fallback for callers that don't care to set it explicitly (an
+// older Panel, a hand-built payload, a test). The admin can hand-edit the
+// instance's launch command afterward for a specific server that needs
+// something different.
 const DefaultJavaHeapMB = 2048
 
 // Configure writes whatever config a freshly-downloaded server needs before
 // its first launch (eula.txt for Java — the server refuses to start
-// without it; server-port for both) and returns the launch command and any
-// extra environment variables mcserver.Manager should run it with.
+// without it; server-port for both, plus any of gamemode/difficulty/
+// max-players/motd the payload sets) and returns the launch command and
+// any extra environment variables mcserver.Manager should run it with.
 func Configure(payload protocol.CreateInstanceCommandPayload, javaBin string) (command []string, env []string, err error) {
 	propsPath := filepath.Join(payload.WorkingDir, "server.properties")
 	if err := mcserver.WriteProperty(propsPath, "server-port", strconv.Itoa(payload.Port)); err != nil {
 		return nil, nil, fmt.Errorf("write server.properties: %w", err)
+	}
+	if err := writePropertyOverrides(propsPath, payload); err != nil {
+		return nil, nil, err
 	}
 
 	switch payload.GamePlatform {
@@ -252,7 +258,11 @@ func Configure(payload protocol.CreateInstanceCommandPayload, javaBin string) (c
 		if err := os.WriteFile(eulaPath, []byte("eula=true\n"), 0o644); err != nil {
 			return nil, nil, fmt.Errorf("write eula.txt: %w", err)
 		}
-		heapFlag := fmt.Sprintf("-Xmx%dM", DefaultJavaHeapMB)
+		heapMB := payload.JavaHeapMB
+		if heapMB <= 0 {
+			heapMB = DefaultJavaHeapMB
+		}
+		heapFlag := fmt.Sprintf("-Xmx%dM", heapMB)
 
 		switch payload.SoftwareType {
 		case "vanilla", "paper":
@@ -291,4 +301,38 @@ func Configure(payload protocol.CreateInstanceCommandPayload, javaBin string) (c
 	default:
 		return nil, nil, fmt.Errorf("unsupported game_platform %q", payload.GamePlatform)
 	}
+}
+
+// writePropertyOverrides applies whichever of gamemode/difficulty/
+// max-players/motd the payload actually set, leaving everything else for
+// the server software's own first-launch defaults to fill in (same as
+// server-port always has been). Gamemode/difficulty/max-players share the
+// same key on both editions; motd is edition-specific — Bedrock has no
+// "motd" key, its equivalent display-name field is "server-name".
+func writePropertyOverrides(propsPath string, payload protocol.CreateInstanceCommandPayload) error {
+	if payload.Gamemode != "" {
+		if err := mcserver.WriteProperty(propsPath, "gamemode", payload.Gamemode); err != nil {
+			return fmt.Errorf("write gamemode: %w", err)
+		}
+	}
+	if payload.Difficulty != "" {
+		if err := mcserver.WriteProperty(propsPath, "difficulty", payload.Difficulty); err != nil {
+			return fmt.Errorf("write difficulty: %w", err)
+		}
+	}
+	if payload.MaxPlayers > 0 {
+		if err := mcserver.WriteProperty(propsPath, "max-players", strconv.Itoa(payload.MaxPlayers)); err != nil {
+			return fmt.Errorf("write max-players: %w", err)
+		}
+	}
+	if payload.Motd != "" {
+		motdKey := "motd"
+		if payload.GamePlatform == "bedrock" {
+			motdKey = "server-name"
+		}
+		if err := mcserver.WriteProperty(propsPath, motdKey, payload.Motd); err != nil {
+			return fmt.Errorf("write %s: %w", motdKey, err)
+		}
+	}
+	return nil
 }

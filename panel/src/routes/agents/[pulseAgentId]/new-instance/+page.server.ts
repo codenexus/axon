@@ -14,6 +14,24 @@ import {
 } from '$lib/server/versionCatalog';
 import type { CreateInstanceCommandPayload } from '$lib/server/protocol';
 
+// Spectator is deliberately excluded here -- Bedrock's server.properties
+// has no valid "spectator" gamemode value, only these three.
+const VALID_GAMEMODES = ['survival', 'creative', 'adventure', 'spectator'];
+const VALID_DIFFICULTIES = ['peaceful', 'easy', 'normal', 'hard'];
+
+// Empty string means "not set" — distinct from an invalid non-numeric or
+// non-positive value, which is a real input error. Same shape as the
+// agent-detail page's own copy of this — small enough that duplicating it
+// once more didn't seem worth extracting yet (see STYLE.md's reasoning
+// for CSS classes duplicated per-file until a third caller needs them).
+function parsePositiveIntOrNull(raw: FormDataEntryValue | null): number | null | 'invalid' {
+	const value = String(raw ?? '').trim();
+	if (!value) return null;
+	const parsed = Number(value);
+	if (!Number.isInteger(parsed) || parsed <= 0) return 'invalid';
+	return parsed;
+}
+
 export const load: PageServerLoad = async ({ params, url, locals }) => {
 	const [agent] = await locals.db.select().from(pulseAgents).where(eq(pulseAgents.id, params.pulseAgentId));
 	if (!agent) throw error(404, 'agent not found');
@@ -99,6 +117,24 @@ export const actions: Actions = {
 
 		if (!name) return fail(400, { error: 'name is required' });
 
+		// Server settings (heap size, gamemode/difficulty/max-players/motd)
+		// are always chosen fresh here regardless of whether a definition
+		// supplied the software/version — a definition pins *what* to
+		// install, never *how it's configured*.
+		const gamemode = String(form.get('gamemode') ?? '').trim();
+		if (gamemode && !VALID_GAMEMODES.includes(gamemode)) {
+			return fail(400, { error: 'invalid gamemode' });
+		}
+		const difficulty = String(form.get('difficulty') ?? '').trim();
+		if (difficulty && !VALID_DIFFICULTIES.includes(difficulty)) {
+			return fail(400, { error: 'invalid difficulty' });
+		}
+		const maxPlayers = parsePositiveIntOrNull(form.get('max_players'));
+		if (maxPlayers === 'invalid') return fail(400, { error: 'max players must be a positive whole number' });
+		const javaHeapMb = parsePositiveIntOrNull(form.get('java_heap_mb'));
+		if (javaHeapMb === 'invalid') return fail(400, { error: 'java heap size must be a positive whole number' });
+		const motd = String(form.get('motd') ?? '').trim();
+
 		let gamePlatform: string;
 		let version: string;
 		let downloadUrl: string;
@@ -140,6 +176,14 @@ export const actions: Actions = {
 			loaderVersion = resolved.loaderVersion;
 		}
 
+		// Bedrock's server.properties has no valid "spectator" gamemode —
+		// the create-server form already hides that option once an edition
+		// resolves to bedrock, this is defense in depth against a
+		// hand-crafted request.
+		if (gamePlatform === 'bedrock' && gamemode === 'spectator') {
+			return fail(400, { error: 'spectator is not a valid gamemode for bedrock' });
+		}
+
 		const port = await allocatePort(locals.db, agent.id);
 		if (port == null) {
 			return fail(400, { error: "no free ports remaining in this agent's configured range" });
@@ -157,7 +201,12 @@ export const actions: Actions = {
 			java_major_version: javaMajorVersion,
 			loader_version: loaderVersion,
 			port,
-			working_dir: workingDir
+			working_dir: workingDir,
+			java_heap_mb: gamePlatform === 'java' ? (javaHeapMb ?? undefined) : undefined,
+			gamemode: gamemode || undefined,
+			difficulty: difficulty || undefined,
+			max_players: maxPlayers ?? undefined,
+			motd: motd || undefined
 		};
 
 		const commandId = await queueCommand(locals.db, {
