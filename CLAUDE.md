@@ -1304,6 +1304,35 @@ trademark consideration for the OSS project. The theme switcher lives on
   agent's heartbeat interval before assuming something's broken.
 - **CSS custom properties are prefixed `--axon-*`** — see `STYLE.md` for
   the full palette/spacing/component conventions.
+- **State shared across two separate Node entrypoints (the SvelteKit
+  bundle plus a hand-written one like `server.mjs`) needs a `globalThis`
+  anchor, not a module-level `const`.** Each entrypoint gets its own
+  bundled copy of any shared module, so a plain `const channels = new
+  Map()` in `realtime/node.ts` would silently become two different,
+  disconnected `Map` instances depending on which entrypoint touched it
+  first — real bug, caught live (see "Adaptive heartbeat interval +
+  real-time push layer" above). Anchor with
+  `(globalThis as any).__someKey ??= new Map()` instead, so every
+  caller in the same OS process shares the literal same object
+  regardless of which bundle loaded it.
+- **`fetch()` follows redirects by default — pass `redirect: 'manual'`
+  whenever a fetch result is used as a pass/fail authorization check
+  against a route that might redirect on failure**, not just read as
+  data. A GET to a route gated by `hooks.server.ts`'s admin-session
+  check returns a `303` to `/login` when unauthenticated; a plain
+  `fetch()` transparently follows that redirect and returns the login
+  page's own `200 OK`, making `.ok` true for a request that actually
+  failed auth. Caused a real, live auth bypass (an unauthenticated
+  WebSocket connected successfully) before this was caught — see the
+  real-time push layer's loopback auth check in `server.mjs`.
+- **Any custom-width `<input>`/`<select>` needs an explicit
+  `box-sizing: border-box`, every time, no exceptions.** This codebase
+  has no global CSS reset, so the browser default (`content-box`) adds
+  padding/border *on top of* a specified `width` instead of within it —
+  bit this project twice in the same session, independently, in two
+  different files (`.settings-form`/`.release-form`), both times as a
+  field visibly overlapping a sibling button. Set it directly on the
+  input rule itself, don't rely on inheriting it from anywhere.
 
 ## Known gaps (real, not yet fixed — don't assume otherwise)
 
@@ -1323,6 +1352,26 @@ trademark consideration for the OSS project. The theme switcher lives on
   but a partially-downloaded file or half-created directory has no
   automatic sweep — matches this project's existing tolerance for similar
   one-off gaps (e.g. the PID-file bootstrap gap above).
+- **Bedrock instances have no remote admin surface at all.** Confirmed
+  live: Bedrock Dedicated Server has no RCON support, full stop — not a
+  version or config-key issue (see "Raw RCON console" above). The
+  console/moderation UI is correctly hidden for Bedrock instances now,
+  but nothing replaces it. `mcserver.Manager` never wires up `cmd.Stdin`
+  for spawned processes (`pulse/internal/mcserver/manager.go`) — the
+  *actual* Mojang-intended interface (typing commands directly into
+  `bedrock_server`'s own console) isn't available today, and an
+  *adopted* process (one `Reconcile()` found already running, not
+  spawned by this Pulse process) couldn't get a stdin pipe retroactively
+  even if this were built — only a future Pulse-initiated start would
+  get one. Discussed with the user, not yet decided whether to build it.
+- **The real-time push layer's Cloudflare Durable Object half is
+  unverified** — no live Cloudflare account/deploy access in this
+  environment. The Node/`ws` half is fully verified live, including
+  against nimo's real production Panel. A standalone DO spike (just
+  `InstanceHub` + the `worker-entry.ts` wrapper) should be the first
+  thing that touches a real Cloudflare account before trusting the full
+  feature there — see "Adaptive heartbeat interval + real-time push
+  layer" above.
 
 ## Project status / scope
 
@@ -1330,50 +1379,71 @@ Deliberately implemented, verified end-to-end locally and (mostly) against
 a real production Bedrock server ("nimo", home LAN, Tailscale-reachable) —
 see `PROJECT_LOG.md` for session-by-session detail on each:
 
-- **Pulse**: enrollment; heartbeat; start/stop/restart; RCON graceful
-  stop; PID-file process reconciliation; full backup lifecycle
+- **Pulse**: enrollment; heartbeat (now interval-adaptive — see "Adaptive
+  heartbeat interval" below); start/stop/restart; RCON graceful stop
+  (Java only — Bedrock has no RCON at all, see below); PID-file process
+  reconciliation; full backup lifecycle
   (create/list/delete/download/restore/schedule/retention); provisioning
-  new Java (vanilla/Paper/Fabric/Forge) and Bedrock (vanilla) servers,
-  including running Fabric/Forge's installer program
-  (`pulse/internal/provision`'s `RunInstaller` — **installer execution
-  itself unverified, no Java runtime in the environment this was built
-  in**, see "Provisioning new servers" above); deleting a provisioned
-  instance; a raw RCON console; a raw `server.properties` read/write
-  pair; file management (list/upload/delete); self-update (Ed25519-signed
-  atomic binary swap with grace-period confirm/rollback); allowlisted host
-  diagnostic commands (`pulse/internal/diagnostics`). `go build/vet/test`
-  clean, including Windows/macOS cross-compiles.
+  new Java (vanilla/Paper/Fabric/Forge, with configurable heap size and
+  gamemode/difficulty/max-players/motd defaults — see "Configurable Java
+  heap size" below) and Bedrock (vanilla) servers, including running
+  Fabric/Forge's installer program (`pulse/internal/provision`'s
+  `RunInstaller` — **installer execution itself unverified, no Java
+  runtime in the environment this was built in**, see "Provisioning new
+  servers" above); deleting a provisioned instance; a raw RCON console
+  (**Java only — confirmed live that Bedrock Dedicated Server has no
+  RCON support at all**, see "Raw RCON console" above); a raw
+  `server.properties` read/write pair (works on both editions, no RCON
+  involved); file management (list/upload/delete); self-update
+  (Ed25519-signed atomic binary swap with grace-period confirm/rollback,
+  now also guarding against re-applying an already-confirmed version —
+  see "Self-update" above for the real infinite-loop incident that
+  guard exists because of); allowlisted host diagnostic commands
+  (`pulse/internal/diagnostics`). `go build/vet/test` clean, including
+  Windows/macOS cross-compiles.
 - **Panel**: single-admin auth; enrollment token generation; dashboard
   with online/offline status + accurate in-flight badges
   (starting/stopping/restarting/deleting/backing-up/restoring), player
   count/uptime shown per instance row, and a small icon marking which
   rows are actual Minecraft servers vs. the node/agent card they sit
-  inside; a per-instance page with backups, scheduling/retention, an
-  RCON console transcript, whitelist/op/ban moderation forms, a
-  properties editor, and a "Danger Zone" delete card; a file browser; a
-  themed confirm modal; 3 theme palettes; an agent detail page with
-  port-range/instances-dir config, a create-server flow (Java software
-  choice of vanilla/Paper/Fabric/Forge, Bedrock vanilla-only, with
-  reusable saved server definitions pinning the same choice, plus a
-  "Server settings" section for Java heap size and gamemode/difficulty/
-  max-players/motd defaults — see "Configurable Java heap size" below),
-  host stats (CPU/RAM/disk/uptime), and an allowlisted diagnostic-command
-  runner; a "Publish Pulse release" form + "→ vNEW available" note for
-  self-update; an adaptive heartbeat interval and adapter-agnostic
-  real-time push layer for the instance console page (see "Adaptive
-  heartbeat interval + real-time push layer" above — Cloudflare half
-  unverified in this environment, flagged explicitly there).
-  `svelte-check` clean; both `ADAPTER=node` and `ADAPTER=cloudflare`
-  builds pass. A Tauri desktop thin client (`panel/src-tauri/`) is
-  compiled and was live-run-verified (WSL2 Ubuntu 24.04) but is **being
-  pulled out of active scope after live Windows testing** — rescoped as
-  a v2 local-Windows-service initiative, not yet designed — see "Panel:
-  one codebase, three adapters" above.
+  inside; a per-instance page with backups, scheduling/retention, a
+  properties editor, and a "Danger Zone" delete card — plus, **Java
+  instances only**, an RCON console transcript and whitelist/op/ban
+  moderation forms (Bedrock instances show a short explanatory note in
+  their place instead, since there's nothing RCON-based to offer); a
+  file browser; a themed confirm modal; 3 theme palettes; an agent
+  detail page with port-range/instances-dir config, a create-server flow
+  (Java software choice of vanilla/Paper/Fabric/Forge, Bedrock
+  vanilla-only, with reusable saved server definitions pinning the same
+  choice, plus a "Server settings" section for Java heap size and
+  gamemode/difficulty/max-players/motd defaults — see "Configurable Java
+  heap size" above), host stats (CPU/RAM/disk/uptime), and an
+  allowlisted diagnostic-command runner; a "Publish Pulse release" form +
+  "→ vNEW available" note for self-update; an adaptive heartbeat interval
+  and adapter-agnostic real-time push layer for the instance console page
+  (see "Adaptive heartbeat interval + real-time push layer" above —
+  Node side fully verified live, including against nimo's real
+  production Panel; Cloudflare half unverified in this environment,
+  flagged explicitly there). `svelte-check` clean; both `ADAPTER=node`
+  and `ADAPTER=cloudflare` builds pass. A Tauri desktop thin client
+  (`panel/src-tauri/`) is compiled and was live-run-verified (WSL2
+  Ubuntu 24.04) but is **being pulled out of active scope after live
+  Windows testing** — rescoped as a v2 local-Windows-service initiative,
+  not yet designed — see "Panel: one codebase, three adapters" above.
 - Repo pushed to `codenexus/axon` (**public**, AGPL-3.0), `main` branch. A
   tag-triggered CI/CD pipeline (`.github/workflows/release.yml`)
   cross-compiles, signs, and publishes a GitHub Release for Pulse, plus a
   second job that builds an (unsigned) Windows Tauri desktop installer
-  onto the same release — see "CI/CD for Pulse releases" above.
+  onto the same release — see "CI/CD for Pulse releases" above. Real
+  incident + fix: the release build's `git describe` didn't reliably see
+  the tag that triggered it (a well-known `actions/checkout` gotcha),
+  which combined with self-update's version-diff trigger to cause an
+  infinite self-update restart loop on nimo — see "Self-update" above.
+  nimo (home LAN, Tailscale-reachable) is the real production host this
+  project verifies against; Panel runs there persistently as a systemd
+  **user** service on `panel/server.mjs` (not the generated `node
+  build/index.js` — needed once the real-time push layer landed, see
+  "Panel: one codebase, three adapters" above).
 
 Deliberately deferred — don't assume half-built unless you find code for it:
 

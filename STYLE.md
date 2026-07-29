@@ -84,9 +84,21 @@ Stick to these values rather than inventing new ones:
   inputs (`<input type="hidden" name="..." value={...} />`), not JSON
   bodies. Inline error display is a `{#if form?.error}<p class="error">`
   directly below the relevant input, styled with
-  `color: var(--axon-status-error)`.
+  `color: var(--axon-status-error)`. A successful save/action uses the same
+  shape with `.success` instead — `{#if form?.success}<p class="success">`,
+  `color: var(--axon-status-success)` — the positive counterpart, added
+  once a form (server-properties save) needed to confirm success, not just
+  surface failure. Don't invent a third variant; map any other outcome onto
+  one of these two.
 - **Inputs**: padding `0.5rem 0.625rem`, `border-radius: 0.375rem`,
   `border: 1px solid var(--axon-accent)`, `background: var(--axon-background)`.
+  Any input/select given a custom `width` (not left to its natural/flex
+  sizing) **must** also get `box-sizing: border-box` — without it the
+  padding/border add on top of the declared width instead of inside it,
+  which is exactly narrow enough to go unnoticed until the input sits next
+  to something else (a button, another field) and visibly overlaps it.
+  Found live on the new-instance directory field overlapping its submit
+  button; check this any time a width is added to an existing input.
 - **Ghost link** (`.ghost-link`): the anchor-tag equivalent of a `.ghost`
   button, for navigation/actions that render as a link rather than a form
   submit (e.g. a "Backups →" link, a ready "Download ⬇" link). Same visual
@@ -183,6 +195,50 @@ Stick to these values rather than inventing new ones:
   list is never silently submitted. Reuse this `$derived.by` + resetting
   `$effect` shape for any future "picking A filters the options for B"
   dropdown pair rather than inventing a new reactivity pattern.
+- **List row with right-aligned metadata** (`.instance-row` /
+  `.instance-info` / `.instance-side` / `.instance-stats`, dashboard agent
+  cards and the agent-detail page's instance list): each row is
+  `display: flex; justify-content: space-between; align-items: center`.
+  `.instance-info` (left) is `display: flex; flex-direction: column` —
+  name/status on top, secondary detail below. `.instance-side` (right) is
+  `display: flex; align-items: center; gap` — small `.instance-stats` text
+  (`opacity: 0.7`, `font-size: 0.8rem`, e.g. player count/uptime) directly
+  followed by the row's action buttons/links. Built to replace an earlier
+  layout that wasted horizontal space on wide viewports; reuse this
+  three-part shape (info left, stats+actions right) for any future list of
+  like-things-with-actions rather than stacking everything vertically.
+- **Inline marker icon** (`.server-icon`, prefixed before an instance's
+  name in `.instance-info`): a small hand-written inline SVG (a simple
+  cube glyph), `opacity: 0.6`, `flex-shrink: 0`, sized to the text line
+  height, `stroke="currentColor"` per the existing inline-SVG convention
+  (see Icon button above). Exists so a glance at the dashboard/agent-detail
+  page can tell "this row is an actual Minecraft server instance" apart
+  from a node/agent card — those look otherwise identical at a glance.
+  Reuse for any future "this row is fundamentally a different kind of
+  thing than its siblings" distinction; don't reach for color or badge
+  text for that job, a marker icon reads faster.
+- **Section label** (`.section-label`, e.g. dividing "Server settings"
+  within the create-server form): a small sub-heading —
+  `font-size: 0.8rem`, `opacity: 0.7`, `text-transform: uppercase`,
+  `letter-spacing: 0.03em`, `border-top: 1px solid var(--axon-accent);
+  padding-top: 1rem; margin-top: 0.5rem` — used to break a single long
+  vertical `.create-form` into logical groups without turning it into
+  multiple cards. Reuse this for any future form that grows past one
+  visually flat group of fields, in place of splitting into separate
+  `.card`s (which implies separable, independently-actionable sections —
+  a single-submit form isn't that).
+- **Capability-gated section shows an explanation, not silence**: when a
+  feature genuinely cannot work for some instances (e.g. the RCON
+  console/Player Management cards for a Bedrock instance — Bedrock
+  Dedicated Server has no RCON support at all, see CLAUDE.md's "Raw RCON
+  console" section), don't just omit the section with no trace, and don't
+  show the normal controls knowing they'll only ever fail. Instead render
+  a brief `<p class="meta">` explanation in the section's place (e.g. "RCON
+  isn't supported on Bedrock servers — console/moderation commands aren't
+  available for this instance."). The admin should be able to tell "this
+  isn't available" from "this is available and something's wrong" without
+  guessing. Apply this same shape to any future feature that's genuinely
+  edition/platform-gated rather than universally available.
 
 ## Typography & assets
 

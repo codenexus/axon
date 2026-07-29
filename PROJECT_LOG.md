@@ -7,6 +7,86 @@ documentation — see `README.md` for that, `CLAUDE.md` for architecture,
 
 ---
 
+## 2026-07-28 (cont. 2) — Session handoff to codex: docs sync
+
+### What we finished
+
+Wrapping up this session and handing the project to codex for continued
+work. No new feature code this entry — purely bringing `CLAUDE.md`,
+`STYLE.md`, and this log in sync with everything built in the two entries
+below (nimo deployment, the bug-fix sprint, adaptive heartbeat interval +
+real-time push, configurable Java heap/properties defaults, the self-update
+infinite-loop incident and fix, and the Bedrock-has-no-RCON discovery).
+
+- **`CLAUDE.md`**: added three new "Coding conventions" entries learned
+  this session (`globalThis` anchoring for state shared across two
+  separate Node entrypoints — the SvelteKit bundle and `server.mjs`;
+  `fetch()`'s default redirect-following as a pitfall for pass/fail
+  auth checks, needs `redirect: 'manual'`; any custom-width input needs
+  explicit `box-sizing: border-box`). Rewrote "Project status / scope" to
+  reflect current reality (RCON/whitelist-op-ban is Java-only now; the
+  self-update anti-loop guard; the CI `git describe` tag-visibility fix;
+  nimo runs via `server.mjs`, not `node build/index.js`; real-time push
+  Node-verified/Cloudflare-unverified; Tauri pulled from active scope,
+  rescoped to a v2 idea). Added two new "Known gaps": Bedrock has zero
+  remote admin surface (no RCON, `cmd.Stdin` never wired for a stdin
+  console — see next steps below), and the Cloudflare Durable Object half
+  of real-time push is unverified (no live Cloudflare account/deploy
+  access in this environment, same honesty already applied to Tauri and
+  Fabric/Forge installer execution).
+- **`STYLE.md`**: documented five patterns already in use but not yet
+  written down — `.success` (positive counterpart to the existing
+  `.error` inline-form-message pattern), the `box-sizing: border-box`
+  requirement for custom-width inputs, the `.instance-row`/`.instance-info`/
+  `.instance-side`/`.instance-stats` list-with-right-aligned-metadata
+  layout (dashboard + agent-detail instance lists), the `.server-icon`
+  inline marker distinguishing a server row from a node/agent card, the
+  `.section-label` sub-heading pattern for dividing a long vertical form,
+  and "capability-gated section shows an explanation, not silence" as a
+  named UX principle (the Bedrock Console/Player-Management gating is the
+  reference example).
+- **`PROJECT_LOG.md`**: this entry.
+
+### Key technical decisions (with why)
+
+- **codex will review `CLAUDE.md` directly** even though it natively
+  looks for `AGENTS.md` — the user's explicit choice, so `CLAUDE.md`
+  needed to be fully self-consistent and current on its own, not
+  relying on tribal knowledge from this chat session.
+- Nothing architectural changed in this entry — this was a documentation
+  pass only, on the theory (already established twice before in this
+  project, see the `53df4fb`/`ff78aab` "Prepare for session handoff"
+  commits) that a docs-sync pass before a context switch is cheaper than
+  re-deriving the same conventions from scratch later.
+
+### Next 2–3 logical steps
+
+1. **Decide Bedrock's admin story.** Confirmed this session that Bedrock
+   Dedicated Server has no RCON at all — its only remote-admin surface
+   right now is the `server.properties` editor. Discussed but explicitly
+   *not decided*: whether to build a stdin-based console instead (Bedrock
+   accepts commands on the process's own stdin, unlike Java's RCON path;
+   `cmd.Stdin` is currently never wired in `pulse/internal/mcserver`, and
+   an adopted/reconciled process — see PID-file reconciliation in
+   CLAUDE.md — has no live stdin handle at all regardless). Needs a real
+   design decision before any code, not just an extension of the existing
+   RCON-shaped `console_command` type.
+2. **Clear the explicitly-flagged unverified items** before trusting them
+   on a real host: the Cloudflare Durable Object half of real-time push
+   (needs a real Cloudflare account/deploy, start with the standalone
+   echo-DO spike described in the real-time-push plan); Fabric/Forge
+   installer execution against a real Java environment (resolvers are
+   live-verified, the installer run itself is reasoned from docs only);
+   and the first real restore against nimo's actual backups (still
+   deliberately left to the user to trigger, safety-backup net in place).
+3. **Tauri v2**: the current thin-client shell was pulled from active
+   scope this session (judged not to work as implemented) and rescoped as
+   a future "Panel as a bundled local Windows service" redesign — closer
+   to the original sidecar concept than the thin-client. Not designed
+   yet; needs its own planning pass whenever it's picked back up.
+
+---
+
 ## 2026-07-28 (cont.) — Discovered: Bedrock Dedicated Server has no RCON at all
 
 Tried to enable RCON on nimo's real "Survival" Bedrock instance to test
